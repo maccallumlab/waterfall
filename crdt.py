@@ -21,6 +21,7 @@ class GCounter:
     client_id : string
                 a unique identifier for this client, usually a UUID
     """
+
     def __init__(self, client_id):
         self.client_id = client_id
         self._data = {self.client_id: 0}
@@ -74,6 +75,7 @@ class GCounter:
             "_data": {self.client_id: self._data[self.client_id]},
         }
         return state
+
 
 class GAverage:
     """A grow-only average CRDT
@@ -171,10 +173,12 @@ class GSet:
     def __init__(self, client_id):
         self.client_id = client_id
         self._data = set()
+        self._mine = set()
 
     def add(self, item):
         """Insert an item"""
         self._data.add(item)
+        self._mine.add(item)
 
     @property
     def items(self):
@@ -210,6 +214,15 @@ class GSet:
         for item in x.payload:
             self._data.add(item)
 
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
+        state = {"client_id": self.client_id, "_mine": self._mine}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        self._data = self._mine.copy()
+
 
 class TombstoneSet:
     """A set that can grow or shrink
@@ -227,6 +240,8 @@ class TombstoneSet:
         self.client_id = client_id
         self._inserted = set()
         self._removed = set()
+        self._my_inserted = set()
+        self._my_removed = set()
 
     def add(self, item):
         """Insert an item
@@ -235,6 +250,7 @@ class TombstoneSet:
         removed, it can never be re-`add`ed. 
         """
         self._inserted.add(item)
+        self._my_inserted.add(item)
 
     def remove(self, item):
         """Remove an item
@@ -243,6 +259,7 @@ class TombstoneSet:
         removed, it can never be re-`add`ed. 
         """
         self._removed.add(item)
+        self._my_removed.add(item)
 
     @property
     def items(self):
@@ -278,6 +295,20 @@ class TombstoneSet:
         assert isinstance(x, TombstoneSet)
         self._inserted.update(x.payload.inserted)
         self._removed.update(x.payload.removed)
+
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
+        state = {
+            "client_id": self.client_id,
+            "_my_inserted": self._my_inserted,
+            "_my_removed": self._my_removed,
+        }
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        self._inserted = self._my_inserted.copy()
+        self._removed = self._my_removed.copy()
 
 
 class UUIDMap:

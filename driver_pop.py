@@ -3,7 +3,7 @@ import numpy as np
 import logging
 
 N = 1000
-s = state.State(10)
+s = state.State(50)
 
 with s.transact():
     for i in range(N):

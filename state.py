@@ -12,6 +12,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def init_logging(s, console=True, level=None):
     if console:
         logging.basicConfig(
@@ -108,19 +109,20 @@ class State:
         self._in_transaction = False
         self.n_stages = n_stages
         self.client_id = client_id if client_id else gen_random_client_id()
-        self._current_structure_offset = 0
         self._averages = [crdt.GAverage(self.client_id) for _ in range(self.n_stages)]
+        self._visits = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
+        self._adds = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
         self._work_queue = crdt.TombstoneSet(self.client_id)
         self._structures = crdt.UUIDMap(self.client_id)
+        self._current_structure_offset = 0
         self._init_structs = crdt.GSet(self.client_id)
         self._provenances = crdt.UUIDMap(self.client_id)
         self._lineages = crdt.GSet(self.client_id)
-        self._visits = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
-        self._adds = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
         self._completed = crdt.GCounter(self.client_id)
         self.log_file = None
         self._state_file = None
         self._struct_file = None
+        self._update_times = {}
         self._setup_files()
         self._update_from_disk()
         self._persist_state()
@@ -151,7 +153,7 @@ class State:
 
     def get_copies_for_weight(self, stage_index, weight):
         self._ensure_in_transaction()
-        if stage_index == self.n_stages-1:
+        if stage_index == self.n_stages - 1:
             self._completed.increment()
             return 0
 
@@ -228,7 +230,6 @@ class State:
         if not items:
             raise RuntimeError("There are no ititial structures")
         return random.choice(items)
-        
 
     def gen_new_lineage(self):
         self._ensure_in_transaction()
@@ -274,21 +275,43 @@ class State:
         ]
         filenames = [f for f in filenames if f.endswith(".dat") and "temp" not in f]
         for filename in filenames:
-            logger.debug("Updating from %s", filename)
-            f = open(filename, "rb")
-            x = pickle.load(f)
-            for i in range(self.n_stages):
-                self._averages[i].merge(x._averages[i])
-                self._visits[i].merge(x._visits[i])
-                self._adds[i].merge(x._adds[i])
-            self._work_queue.merge(x._work_queue)
-            self._structures.merge(x._structures)
-            self._provenances.merge(x._provenances)
-            self._lineages.merge(x._lineages)
-            self._init_structs.merge(x._init_structs)
-            self._completed.merge(x._completed)
+            timestamp = os.path.getmtime(filename)
+            if filename not in self._update_times:
+                update = True
+                self._update_times[filename] = timestamp
+            else:
+                if timestamp == self._update_times[filename]:
+                    update = False
+                else:
+                    update = True
+            if update:
+                logger.debug("Updating from %s", filename)
+                f = open(filename, "rb")
+                x = pickle.load(f)
+                for i in range(self.n_stages):
+                    self._averages[i].merge(x._averages[i])
+                    self._visits[i].merge(x._visits[i])
+                    self._adds[i].merge(x._adds[i])
+                self._work_queue.merge(x._work_queue)
+                self._structures.merge(x._structures)
+                self._provenances.merge(x._provenances)
+                self._lineages.merge(x._lineages)
+                self._init_structs.merge(x._init_structs)
+                self._completed.merge(x._completed)
+            else:
+                logger.debug("Skipping %s", filename)
         logger.debug("Done updating")
 
     def _ensure_in_transaction(self):
         if not self._in_transaction:
             raise RuntimeError("Tried to operate on State outside of a transaction.")
+
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
+        state = self.__dict__.copy()
+        del state['_update_times']
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__ = state
+        self._update_times = {}

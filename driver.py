@@ -8,46 +8,43 @@ logger = logging.getLogger(__name__)
 
 # create our state and setup logging
 s = state.State(10)
-state.init_logging(s, console=True)
+state.init_logging(s, console=True, level=logging.INFO)
 
 with s.transact():
     num_completed = s.get_num_completed()
 
 step = 0
 
+f = open("temp.out", "w")
+
 while num_completed < 100:
     step += 1
     with s.transact():
+        for i in range(s.n_stages):
+            print(
+                "{}\t{}\t".format(s._visits[i].value, s._adds[i].value), file=f, end=""
+            )
+        print("", file=f)
         num_completed = s.get_num_completed()
-    logger.info(
-        "Running step %d, %d completed trajectories of %d", step, num_completed, 100
-    )
+        logger.info(
+            "Running step %d, %d completed trajectories of %d", step, num_completed, 100
+        )
 
-    # decide what to do
-    with s.transact():
         tasks = s.list_simulation_tasks()
+        n = len(tasks)
 
-    n = len(tasks)
-    print()
-    print()
-    print(n)
-    print()
-    print()
-
-    choice = random.randint(0, n)
-    if choice == n:
-        logger.info("Starting new trajectory from top")
-        with s.transact():
+        if n == 0:
+            logger.info("Starting new trajectory from top")
             lineage = s.gen_new_lineage()
             parent = None
             stage = 0
             struct_id_start = s.get_random_initial_structure()
             x_start = s.load_structure(struct_id_start)
             w_start = 1.0
-    else:
-        task = tasks[choice]
-        logger.info("Continuing trajectory %s at copy %d", task.parent, task.copy)
-        with s.transact():
+        else:
+            choice = random.randrange(0, n)
+            task = tasks[choice]
+            logger.info("Continuing trajectory %s at copy %d", task.parent, task.copy)
             lineage = task.lineage
             parent = task.parent
             stage = task.stage
@@ -58,7 +55,7 @@ while num_completed < 100:
 
     # pretend to simulate
     logger.info("Running MD at stage %d", stage)
-    time.sleep(5.0)
+    time.sleep(0.01)
     x_end = np.random.normal(size=(1000, 3))
     w_end = w_start * np.random.lognormal(1.0, 1.0)
     logger.info("MD at stage %d complete", stage)
@@ -88,5 +85,19 @@ while num_completed < 100:
                 lineage, prov_hash, struct_id_end, w_end / copies, stage + 1, i
             )
             s.add_simulation_task(task)
+
+        # if we hit bottom, then add in a new traj at top
+        # if stage == s.n_stages - 1:
+        #     logger.info("Trajectory completed, starting new task from top")
+        #     lineage = s.gen_new_lineage()
+        #     parent = None
+        #     stage = 0
+        #     struct_id_start = s.get_random_initial_structure()
+        #     x_start = s.load_structure(struct_id_start)
+        #     w_start = 1.0
+        #     task = state.SimulationTask(
+        #         lineage, parent, struct_id_start, w_start, stage, 0
+        #     )
+
 
 logger.info("Worker finished normally")
