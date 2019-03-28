@@ -10,8 +10,70 @@ from collections import namedtuple
 
 AverageEntry = namedtuple("AverageEntry", "count sum")
 TombstoneEntry = namedtuple("TombstoneEntry", "inserted removed")
-UUIDMapItem = namedtuple("UUIDDictItem", "key value")
+UUIDMapItem = namedtuple("UUIDMapItem", "key value")
 
+
+class GCounter:
+    """A grow-only counter
+
+    Parameters
+    ----------
+    client_id : string
+                a unique identifier for this client, usually a UUID
+    """
+    def __init__(self, client_id):
+        self.client_id = client_id
+        self._data = {self.client_id: 0}
+
+    def increment(self):
+        """Increment the counter
+        """
+        self._data[self.client_id] += 1
+
+    @property
+    def value(self):
+        """Return the total count
+        """
+        count = 0
+        for _, value in self._data.items():
+            count += value
+        return count
+
+    @property
+    def payload(self):
+        """The payload containing all information observed
+
+        Returns
+        -------
+        dict
+            each key represents the observations from a single client
+        """
+        return self._data
+
+    def merge(self, x):
+        """Merge the observations into `self`
+
+        Parameters
+        ----------
+        x : GCounter
+            observations from `x` will be merged into `self`
+        """
+        assert isinstance(x, GCounter)
+        for key, value in x.payload.items():
+            if key in self._data:
+                if value > self._data[key]:
+                    self._data[key] = value
+            else:
+                self._data[key] = value
+
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
+        # this is a performance optimization
+        state = {
+            "client_id": self.client_id,
+            "_data": {self.client_id: self._data[self.client_id]},
+        }
+        return state
 
 class GAverage:
     """A grow-only average CRDT
@@ -87,6 +149,14 @@ class GAverage:
                     self._data[key] = value
             else:
                 self._data[key] = value
+
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
+        state = {
+            "client_id": self.client_id,
+            "_data": {self.client_id: self._data[self.client_id]},
+        }
+        return state
 
 
 class GSet:
@@ -243,6 +313,9 @@ class UUIDMap:
             raise RuntimeError("Entries in a UUIDMap cannot be re-written")
         self._dict[key] = value
         self._data.add(UUIDMapItem(key, value))
+
+    def __contains__(self, key):
+        return key in self._dict
 
     @property
     def payload(self):

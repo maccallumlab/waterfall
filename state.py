@@ -1,0 +1,294 @@
+import uuid
+import math
+import os
+import pickle
+import shutil
+import contextlib
+import hashlib
+from collections import namedtuple
+import crdt
+import random
+import logging
+
+logger = logging.getLogger(__name__)
+
+def init_logging(s, console=True, level=None):
+    if console:
+        logging.basicConfig(
+            level=level or logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    else:
+        logging.basicConfig(
+            filename=s.log_file,
+            level=level or logging.INFO,
+            format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    logger.info("Worker started")
+    logger.info(f"Created State(n_stages={s.n_stages})")
+    logger.info(f"Client_id=f{s.client_id}")
+
+
+SimulationTask = namedtuple(
+    "SimulationTask", "lineage parent struct_hash start_weight stage copy"
+)
+SimulationTask.__doc__ = """\
+A namedtuple to hold a simulation task.
+
+Attributes
+----------
+lineage : string
+    Each simulation started from the top is given a unique random uuid.
+    This is maintained by all children.
+parent : string
+    The hash of the parent ProvenanceEntry. This is `None` for simulations
+    started from the top stage.
+struct_hash : string
+    The hash of the starting structure.
+start_weight : float
+    The initial weight of this structure.
+stage : int
+    The stage of the calculation: 0 for the top stage, n_stages-1 for the bottom.
+copy : int
+    An integer counter indicating which copy this is.
+"""
+
+StructureEntry = namedtuple("StructureEntry", "file offset length")
+StructureEntry.__doc__ = """\
+A namedtuple to hold information about a structure stored on disk.
+
+Attributes
+----------
+file : string
+    The path to the file containing this structure.
+offset : int
+    The offset in bytes where the structure starts.
+length : int
+    The length of the structure in bytes.
+"""
+
+ProvenanceEntry = namedtuple(
+    "ProvenanceEntry",
+    "lineage parent struct_start weight_start stage struct_end weight_end copies",
+)
+ProvenanceEntry.__doc__ = """\
+A namedtuple to hold information about the provenance of structures.
+
+Attributes
+----------
+lineage : string
+    Each simulation started from the top is given a unique random uuid.
+    This is maintained by all children.
+parent : string
+    The hash of the parent ProvenanceEntry. This is `None` for simulations
+    started from the top stage.
+struct_start : string
+    The hash of the starting structure.
+weight_start : float
+    The initial weight of this structure.
+stage : int
+    The stage of the calculation: 0 for the top stage, n_stages-1 for the bottom.
+struct_end : string
+    The hash of the ending structure.
+weight_end : float
+    The weight of the final structure.
+copies : int
+    The number of copies of this structure added to the work queue
+"""
+
+
+def gen_random_client_id():
+    return uuid.uuid4().hex
+
+
+class State:
+    def __init__(self, n_stages, client_id=None):
+        self._in_transaction = False
+        self.n_stages = n_stages
+        self.client_id = client_id if client_id else gen_random_client_id()
+        self._current_structure_offset = 0
+        self._averages = [crdt.GAverage(self.client_id) for _ in range(self.n_stages)]
+        self._work_queue = crdt.TombstoneSet(self.client_id)
+        self._structures = crdt.UUIDMap(self.client_id)
+        self._init_structs = crdt.GSet(self.client_id)
+        self._provenances = crdt.UUIDMap(self.client_id)
+        self._lineages = crdt.GSet(self.client_id)
+        self._visits = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
+        self._adds = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
+        self._completed = crdt.GCounter(self.client_id)
+        self.log_file = None
+        self._state_file = None
+        self._struct_file = None
+        self._setup_files()
+        self._update_from_disk()
+        self._persist_state()
+
+    @contextlib.contextmanager
+    def transact(self):
+        logger.debug("Transaction started")
+        self._in_transaction = True
+        self._update_from_disk()
+        yield
+        self._persist_state()
+        self._in_transaction = False
+        logger.debug("Transaction ended")
+
+    def get_num_completed(self):
+        self._ensure_in_transaction()
+        return self._completed.value
+
+    def add_weight_observation(self, stage_index, obs):
+        logger.debug("Added weight obs of %f to stage %d", obs, stage_index)
+        self._ensure_in_transaction()
+        self._averages[stage_index].add_observation(obs)
+        self._visits[stage_index].increment()
+
+    def get_average_weight(self, stage_index):
+        self._ensure_in_transaction()
+        return self._averages[stage_index].value
+
+    def get_copies_for_weight(self, stage_index, weight):
+        self._ensure_in_transaction()
+        if stage_index == self.n_stages-1:
+            self._completed.increment()
+            return 0
+
+        average = self.get_average_weight(stage_index)
+        low = math.floor(weight / average)
+        high = math.ceil(weight / average)
+        frac = (weight / average) - low
+        if low == 0:
+            if random.random() < frac:
+                return int(high)
+            else:
+                return int(low)
+        else:
+            if self._visits[stage_index].value < self._adds[stage_index].value:
+                return int(high)
+            else:
+                return int(low)
+
+    def add_simulation_task(self, task):
+        logger.debug("Added simulation task %s to queue", task)
+        self._ensure_in_transaction()
+        self._work_queue.add(task)
+        self._adds[task.stage].increment()
+
+    def list_simulation_tasks(self):
+        self._ensure_in_transaction()
+        return self._work_queue.items
+
+    def remove_simulation_task(self, task):
+        logger.debug("Removed simulation task %s from queue", task)
+        self._ensure_in_transaction()
+        self._work_queue.remove(task)
+
+    def save_structure(self, structure):
+        self._ensure_in_transaction()
+        data = pickle.dumps(structure)
+        length = len(data)
+        hash = hashlib.sha256(data).hexdigest()
+        assert hash not in self._structures
+        with open(self._struct_file, "ab") as f:
+            f.seek(0, os.SEEK_END)
+            f.write(data)
+        entry = StructureEntry(
+            self._struct_file, self._current_structure_offset, length
+        )
+        self._structures[hash] = entry
+        self._current_structure_offset += length
+        logger.debug("Saved structure with hash %s to file %s", hash, self._struct_file)
+        return hash
+
+    def load_structure(self, hash):
+        logger.debug("Loading structure with hash %s", hash)
+        self._ensure_in_transaction()
+        entry = self._structures[hash]
+        logger.debug("Opening file %s", entry.file)
+        with open(entry.file, "rb") as f:
+            logger.debug("Seeking offset %d", entry.offset)
+            f.seek(entry.offset)
+            logger.debug("Reading %d bytes", entry.length)
+            data = f.read(entry.length)
+        struct = pickle.loads(data)
+        return struct
+
+    def add_initial_structure(self, structure):
+        self._ensure_in_transaction()
+        hash = self.save_structure(structure)
+        self._init_structs.add(hash)
+        logger.debug("Added initial structure with hash %s", hash)
+        return hash
+
+    def get_random_initial_structure(self):
+        self._ensure_in_transaction()
+        items = self._init_structs.items
+        if not items:
+            raise RuntimeError("There are no ititial structures")
+        return random.choice(items)
+        
+
+    def gen_new_lineage(self):
+        self._ensure_in_transaction()
+        lineage_id = gen_random_client_id()
+        self._lineages.add(lineage_id)
+        logger.info("Created new lineage %s", lineage_id)
+        return lineage_id
+
+    def add_provenance(self, prov_entry):
+        self._ensure_in_transaction()
+        hash = hashlib.sha256(pickle.dumps(prov_entry)).hexdigest()
+        self._provenances[hash] = prov_entry
+        return hash
+
+    def get_provenance(self, hash):
+        self._ensure_in_transaction()
+        return self._provenances[hash]
+
+    def _setup_files(self):
+        os.makedirs("Data/States", exist_ok=True)
+        os.makedirs("Data/Coords", exist_ok=True)
+        os.makedirs("Data/Logs", exist_ok=True)
+        self._state_file = f"Data/States/{self.client_id}.dat"
+        self._struct_file = f"Data/Coords/{self.client_id}.dat"
+        self.log_file = f"Data/Logs/{self.client_id}.log"
+        if os.path.exists(self._state_file):
+            raise RuntimeError(f"State file {self._state_file} already exists")
+        if os.path.exists(self._struct_file):
+            raise RuntimeError(f"Struct file {self._struct_file} already exists")
+
+    def _persist_state(self):
+        logger.info("Persisting state to %s", self._state_file)
+        with open(f"Data/States/{self.client_id}_temp.dat", "wb") as f:
+            pickle.dump(self, f)
+        shutil.move(f"Data/States/{self.client_id}_temp.dat", self._state_file)
+
+    def _update_from_disk(self):
+        logger.info("Updating from disk")
+        filenames = [
+            os.path.join("Data/States", f)
+            for f in os.listdir("Data/States")
+            if os.path.isfile(os.path.join("Data/States", f))
+        ]
+        filenames = [f for f in filenames if f.endswith(".dat") and "temp" not in f]
+        for filename in filenames:
+            logger.debug("Updating from %s", filename)
+            f = open(filename, "rb")
+            x = pickle.load(f)
+            for i in range(self.n_stages):
+                self._averages[i].merge(x._averages[i])
+                self._visits[i].merge(x._visits[i])
+                self._adds[i].merge(x._adds[i])
+            self._work_queue.merge(x._work_queue)
+            self._structures.merge(x._structures)
+            self._provenances.merge(x._provenances)
+            self._lineages.merge(x._lineages)
+            self._init_structs.merge(x._init_structs)
+            self._completed.merge(x._completed)
+        logger.debug("Done updating")
+
+    def _ensure_in_transaction(self):
+        if not self._in_transaction:
+            raise RuntimeError("Tried to operate on State outside of a transaction.")
