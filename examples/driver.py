@@ -1,4 +1,4 @@
-import waterfall_runner
+from waterfall import WaterfallRunner
 import numpy as np
 import time
 
@@ -31,7 +31,7 @@ def run(stage, start_state, start_weight):
     return end_state, start_weight * weight_fact
 
 
-waterfall = waterfall_runner.WaterfallRunner(
+waterfall = WaterfallRunner(
     n_stages, n_traj, n_init, target_queue_size
 )
 waterfall.populate_method = populate

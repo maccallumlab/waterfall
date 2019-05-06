@@ -2,7 +2,6 @@ from waterfall import state
 import logging
 import random
 import time
-import numpy as np
 import collections
 
 
