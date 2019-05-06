@@ -7,9 +7,9 @@ import shutil
 import contextlib
 import hashlib
 from collections import namedtuple
-import crdt
 import random
 import logging
+from waterfall import crdt
 
 logger = logging.getLogger(__name__)
 
