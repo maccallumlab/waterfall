@@ -26,10 +26,11 @@ class GCounter:
         self.client_id = client_id
         self._data = {self.client_id: 0}
 
-    def increment(self):
+    def increment(self, val=1):
         """Increment the counter
         """
-        self._data[self.client_id] += 1
+        assert val > 0
+        self._data[self.client_id] += val
 
     @property
     def value(self):
@@ -124,6 +125,20 @@ class GAverage:
             raise ValueError("Tried to get value of empty GAverage.")
 
         return sum / count
+
+    @property
+    def count(self):
+        """The total count of observations
+
+        Returns
+        -------
+        int
+            the total number of observations across all clients
+        """
+        count = 0
+        for _, value in self._data.items():
+            count += value.count
+        return count
 
     @property
     def payload(self):

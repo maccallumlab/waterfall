@@ -1,3 +1,4 @@
+import time
 import uuid
 import math
 import os
@@ -33,7 +34,7 @@ def init_logging(s, console=True, level=None):
 
 
 SimulationTask = namedtuple(
-    "SimulationTask", "lineage parent struct_hash start_weight stage copy"
+    "SimulationTask", "lineage parent struct_hash start_weight stage copies"
 )
 SimulationTask.__doc__ = """\
 A namedtuple to hold a simulation task.
@@ -52,7 +53,7 @@ start_weight : float
     The initial weight of this structure.
 stage : int
     The stage of the calculation: 0 for the top stage, n_stages-1 for the bottom.
-copy : int
+copies : int
     An integer counter indicating which copy this is.
 """
 
@@ -99,6 +100,22 @@ copies : int
     The number of copies of this structure added to the work queue
 """
 
+InProgressEntry = namedtuple("InProgressEntry", "task timestamp max_duration")
+InProgressEntry.__doc__ = """\
+A namedtuple to hold information about tasks that are in progress.
+
+Attributes
+----------
+task : SimulationTask
+    The SimulationTask that is in progress.
+timestamp : float
+    The time when the task was started, in seconds from the epoch.
+    started from the top stage.
+max_duration : float
+    The maximum duration of task. If it takes longer than this, we
+    assume the worker executing the task died or was killed.
+"""
+
 
 def gen_random_client_id():
     return uuid.uuid4().hex
@@ -118,7 +135,10 @@ class State:
         self._init_structs = crdt.GSet(self.client_id)
         self._provenances = crdt.UUIDMap(self.client_id)
         self._lineages = crdt.GSet(self.client_id)
+        self._started = crdt.GCounter(self.client_id)
         self._completed = crdt.GCounter(self.client_id)
+        self._in_progress = crdt.TombstoneSet(self.client_id)
+        self.task_duration = 3600  # default task duration is 1 hour
         self.log_file = None
         self._state_file = None
         self._struct_file = None
@@ -137,6 +157,14 @@ class State:
         self._in_transaction = False
         logger.debug("Transaction ended")
 
+    def mark_visit(self, stage_index):
+        self._ensure_in_transaction()
+        self._visits[stage_index].increment()
+
+    def mark_add(self, stage_index, copies):
+        self._ensure_in_transaction()
+        self._adds[stage_index].increment(copies)
+
     def get_num_completed(self):
         self._ensure_in_transaction()
         return self._completed.value
@@ -145,47 +173,80 @@ class State:
         logger.debug("Added weight obs of %f to stage %d", obs, stage_index)
         self._ensure_in_transaction()
         self._averages[stage_index].add_observation(obs)
-        self._visits[stage_index].increment()
 
     def get_average_weight(self, stage_index):
         self._ensure_in_transaction()
         return self._averages[stage_index].value
 
-    def get_copies_for_weight(self, stage_index, weight):
+    def get_copies_and_weight(self, stage_index, weight):
         self._ensure_in_transaction()
         if stage_index == self.n_stages - 1:
             self._completed.increment()
-            return 0
+            return 0, weight
 
         average = self.get_average_weight(stage_index)
-        low = math.floor(weight / average)
-        high = math.ceil(weight / average)
-        frac = (weight / average) - low
+        R = weight / average
+        low = math.floor(R)
+        high = math.ceil(R)
+        frac = R - low
         if low == 0:
             if random.random() < frac:
-                return int(high)
+                return 1, average
             else:
-                return int(low)
+                return 0, 0.0
         else:
-            if self._visits[stage_index].value < self._adds[stage_index].value:
-                return int(high)
+            a = self._adds[stage_index].value
+            b = self._started.value
+            c = self._visits[stage_index].value - 1
+
+            if a > min(b, c):
+                return int(low), weight / low
             else:
-                return int(low)
+                return int(high), weight / high
 
     def add_simulation_task(self, task):
         logger.debug("Added simulation task %s to queue", task)
         self._ensure_in_transaction()
         self._work_queue.add(task)
-        self._adds[task.stage].increment()
 
     def list_simulation_tasks(self):
         self._ensure_in_transaction()
         return self._work_queue.items
 
+    def get_total_queued(self):
+        total_queued = 0
+        for t in self._work_queue.items:
+            total_queued += t.copies
+        return total_queued
+
     def remove_simulation_task(self, task):
         logger.debug("Removed simulation task %s from queue", task)
         self._ensure_in_transaction()
         self._work_queue.remove(task)
+
+    def add_to_in_progress_queue(self, task):
+        self._ensure_in_transaction()
+        timestamp = time.time()
+        duration = self.task_duration
+        entry = InProgressEntry(task, timestamp, duration)
+        self._in_progress.add(entry)
+        return entry
+
+    def remove_from_in_progress_queue(self, entry):
+        self._ensure_in_transaction()
+        self._in_progress.remove(entry)
+
+    def get_orphan_task(self):
+        self._ensure_in_transaction()
+        current = time.time()
+        for entry in self._in_progress.items:
+            if current > entry.timestamp + entry.max_duration:
+                # This entry has been orphaned, so we will remove the
+                # old entry and restart it.
+                self._in_progress.remove(entry)
+                return entry.task
+        # Return None if none of the entries have expired
+        return None
 
     def save_structure(self, structure):
         self._ensure_in_transaction()
@@ -229,7 +290,13 @@ class State:
         items = self._init_structs.items
         if not items:
             raise RuntimeError("There are no ititial structures")
+        self._started.increment()
         return random.choice(items)
+
+    def get_num_initial_structures(self):
+        self._ensure_in_transaction()
+        items = self._init_structs.items
+        return len(items)
 
     def gen_new_lineage(self):
         self._ensure_in_transaction()
@@ -297,7 +364,9 @@ class State:
                 self._provenances.merge(x._provenances)
                 self._lineages.merge(x._lineages)
                 self._init_structs.merge(x._init_structs)
+                self._started.merge(x._started)
                 self._completed.merge(x._completed)
+                self._in_progress.merge(x._in_progress)
             else:
                 logger.debug("Skipping %s", filename)
         logger.debug("Done updating")
@@ -309,7 +378,7 @@ class State:
     def __getstate__(self):
         # only pickle our own observations, not all observations
         state = self.__dict__.copy()
-        del state['_update_times']
+        del state["_update_times"]
         return state
 
     def __setstate__(self, state):
