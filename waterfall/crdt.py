@@ -6,9 +6,11 @@ a general purpose library.
 """
 
 from collections import namedtuple
+import math
 
 
 AverageEntry = namedtuple("AverageEntry", "count sum")
+LogAverageEntry = namedtuple("LogAverageEntry", "log_sum count")
 TombstoneEntry = namedtuple("TombstoneEntry", "inserted removed")
 UUIDMapItem = namedtuple("UUIDMapItem", "key value")
 
@@ -71,6 +73,100 @@ class GCounter:
     def __getstate__(self):
         # only pickle our own observations, not all observations
         # this is a performance optimization
+        state = {
+            "client_id": self.client_id,
+            "_data": {self.client_id: self._data[self.client_id]},
+        }
+        return state
+
+
+def log_sum_exp(log_w1, log_w2):
+    "Return ln(exp(log_w1) + exp(log_w2)) avoiding overflow."
+    log_max = max(log_w1, log_w2)
+    return log_max + math.log(math.exp(log_w1 - log_max) + math.exp(log_w2 - log_max))
+
+
+class LogAverageWeight:
+    def __init__(self, client_id):
+        self.client_id = client_id
+        self._data = {self.client_id: LogAverageEntry(-math.inf, 0)}
+
+    def add_observation(self, log_weight):
+        """Add an observation
+
+        Parameters
+        ----------
+        log_weight : float
+              the observation to add
+        """
+        old_log_sum, old_count = self._data[self.client_id]
+        self._data[self.client_id] = LogAverageEntry(
+            log_sum_exp(old_log_sum, log_weight), old_count + 1
+        )
+
+    @property
+    def value(self):
+        """The log average value
+
+        Returns
+        -------
+        float
+            the log average value across all clients
+        """
+        count = 0
+        sum = -math.inf
+        for _, value in self._data.items():
+            count += value.count
+            sum = log_sum_exp(sum, value.log_sum)
+
+        if count == 0:
+            raise ValueError("Tried to get value of empty GAverage.")
+
+        return sum - math.log(count)
+
+    @property
+    def count(self):
+        """The total count of observations
+
+        Returns
+        -------
+        int
+            the total number of observations across all clients
+        """
+        count = 0
+        for _, value in self._data.items():
+            count += value.count
+        return count
+
+    @property
+    def payload(self):
+        """The payload containing all information observed
+
+        Returns
+        -------
+        dict
+            each key represents the observations from a single client
+        """
+        return self._data
+
+    def merge(self, x):
+        """Merge the observations into `self`
+
+        Parameters
+        ----------
+        x : GAverage
+            observations from `x` will be merged into `self`
+        """
+        assert isinstance(x, LogAverageWeight)
+        for key, value in x.payload.items():
+            if key in self._data:
+                if value.count > self._data[key].count:
+                    self._data[key] = value
+            else:
+                self._data[key] = value
+
+    def __getstate__(self):
+        # only pickle our own observations, not all observations
         state = {
             "client_id": self.client_id,
             "_data": {self.client_id: self._data[self.client_id]},

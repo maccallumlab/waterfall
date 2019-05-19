@@ -34,7 +34,8 @@ def init_logging(s, console=True, level=None):
 
 
 SimulationTask = namedtuple(
-    "SimulationTask", "lineage parent struct_hash start_weight stage copies"
+    "SimulationTask",
+    "lineage parent struct_hash start_log_weight stage multiplicity child_id",
 )
 SimulationTask.__doc__ = """\
 A namedtuple to hold a simulation task.
@@ -49,12 +50,14 @@ parent : string
     started from the top stage.
 struct_hash : string
     The hash of the starting structure.
-start_weight : float
+start_log_weight : float
     The initial weight of this structure.
 stage : int
     The stage of the calculation: 0 for the top stage, n_stages-1 for the bottom.
-copies : int
-    An integer counter indicating which copy this is.
+multiplicity : int
+    The number of copies this task represents.
+child_id: int
+    Unique identifier for each child
 """
 
 StructureEntry = namedtuple("StructureEntry", "file offset length")
@@ -73,13 +76,15 @@ length : int
 
 ProvenanceEntry = namedtuple(
     "ProvenanceEntry",
-    "lineage parent struct_start weight_start stage struct_end weight_end copies",
+    "id lineage parent struct_start weight_start stage struct_end weight_end multiplicity copies",
 )
 ProvenanceEntry.__doc__ = """\
 A namedtuple to hold information about the provenance of structures.
 
 Attributes
 ----------
+id: string
+    Unique id for this entry.
 lineage : string
     Each simulation started from the top is given a unique random uuid.
     This is maintained by all children.
@@ -96,8 +101,10 @@ struct_end : string
     The hash of the ending structure.
 weight_end : float
     The weight of the final structure.
+multiplicity : int
+    The number of copies this structure represents.
 copies : int
-    The number of copies of this structure added to the work queue
+    The number of children spawned.
 """
 
 InProgressEntry = namedtuple("InProgressEntry", "task timestamp max_duration")
@@ -118,6 +125,7 @@ max_duration : float
 
 
 def gen_random_client_id():
+    "Generate a random uuid string"
     return uuid.uuid4().hex
 
 
@@ -126,7 +134,9 @@ class State:
         self._in_transaction = False
         self.n_stages = n_stages
         self.client_id = client_id if client_id else gen_random_client_id()
-        self._averages = [crdt.GAverage(self.client_id) for _ in range(self.n_stages)]
+        self._averages = [
+            crdt.LogAverageWeight(self.client_id) for _ in range(self.n_stages)
+        ]
         self._visits = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
         self._adds = [crdt.GCounter(self.client_id) for _ in range(self.n_stages)]
         self._work_queue = crdt.TombstoneSet(self.client_id)
@@ -169,40 +179,50 @@ class State:
         self._ensure_in_transaction()
         return self._completed.value
 
-    def add_weight_observation(self, stage_index, obs):
-        logger.debug("Added weight obs of %f to stage %d", obs, stage_index)
+    def add_log_weight_observation(self, stage_index, log_weight):
+        logger.debug("Added log_weight obs of %f to stage %d", log_weight, stage_index)
         self._ensure_in_transaction()
-        self._averages[stage_index].add_observation(obs)
+        self._averages[stage_index].add_observation(log_weight)
 
-    def get_average_weight(self, stage_index):
+    def get_log_average_weight(self, stage_index):
         self._ensure_in_transaction()
         return self._averages[stage_index].value
 
-    def get_copies_and_weight(self, stage_index, weight):
+    def get_copies_and_log_weight(self, stage_index, log_weight):
         self._ensure_in_transaction()
         if stage_index == self.n_stages - 1:
             self._completed.increment()
-            return 0, weight
+            return 0, log_weight
 
-        average = self.get_average_weight(stage_index)
-        R = weight / average
+        log_average = self.get_log_average_weight(stage_index)
+        R = math.exp(log_weight - log_average)
         low = math.floor(R)
         high = math.ceil(R)
         frac = R - low
         if low == 0:
             if random.random() < frac:
-                return 1, average
+                return_copy = 1
+                return_log_average = log_average
             else:
-                return 0, 0.0
+                return_copy = 0
+                return_log_average = -99999
         else:
-            a = self._adds[stage_index].value
-            b = self._started.value
-            c = self._visits[stage_index].value - 1
-
-            if a > min(b, c):
-                return int(low), weight / low
+            if random.random() < frac:
+                return_copy = int(high)
+                return_log_average = log_average
             else:
-                return int(high), weight / high
+                return_copy = int(low)
+                return_log_average = log_average
+        logger.info(
+            "Stage %d log_average %f ratio %f low %d high %d copies %d",
+            stage_index,
+            log_average,
+            R,
+            low,
+            high,
+            return_copy,
+        )
+        return return_copy, return_log_average
 
     def add_simulation_task(self, task):
         logger.debug("Added simulation task %s to queue", task)
@@ -214,10 +234,7 @@ class State:
         return self._work_queue.items
 
     def get_total_queued(self):
-        total_queued = 0
-        for t in self._work_queue.items:
-            total_queued += t.copies
-        return total_queued
+        return len(self._work_queue.items) + len(self._in_progress.items)
 
     def remove_simulation_task(self, task):
         logger.debug("Removed simulation task %s from queue", task)
@@ -291,7 +308,9 @@ class State:
         if not items:
             raise RuntimeError("There are no ititial structures")
         self._started.increment()
-        return random.choice(items)
+        choice = random.choice(items)
+        s = self.load_structure(choice)
+        return choice
 
     def get_num_initial_structures(self):
         self._ensure_in_transaction()
