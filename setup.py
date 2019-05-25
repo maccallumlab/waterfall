@@ -12,4 +12,9 @@ setup(
     license="LICENSE.txt",
     description="Waterfall Sampling",
     long_description=open("README.md").read(),
+    scripts=[
+        "scripts/compute_effective_sample_size",
+        "scripts/count_lineages",
+        "scripts/trace_ancestry",
+    ],
 )

@@ -1,0 +1,70 @@
+from ete3 import Tree, NodeStyle
+from waterfall import datamanager
+from collections import defaultdict
+import math
+
+
+def RGB_to_hex(RGB):
+    """ [255,255,255] -> "#FFFFFF" """
+    # Components need to be integers for hex to make sense
+    RGB = [int(x) for x in RGB]
+    return "#" + "".join(
+        ["0{0:x}".format(v) if v < 16 else "{0:x}".format(v) for v in RGB]
+    )
+
+
+def trace(
+    hash, level, parent_node, with_parent, provenances, n_stages, min_weight, max_weight
+):
+    for item in with_parent[hash]:
+        node = parent_node.add_child()
+        w = provenances[item].end_log_weight
+        rel_w = w - max_weight
+        w = math.exp(rel_w)
+        color = RGB_to_hex((0, 255 * w, 0))
+        node.img_style["fgcolor"] = color
+        c = provenances[item].copies
+        if c == 0 and level < n_stages - 1:
+            node.img_style["fgcolor"] = "red"
+        trace(
+            item,
+            level + 1,
+            node,
+            with_parent,
+            provenances,
+            n_stages,
+            min_weight,
+            max_weight,
+        )
+
+
+def main():
+    dm = datamanager.DataManager.activate(read_only=True)
+    n_stages = dm.n_stages
+
+    # get all of the provenances
+    provenances = {p.id: p for p in dm.get_provenances()}
+    with_parent = defaultdict(list)
+    for p in provenances.values():
+        with_parent[p.parent].append(p.id)
+
+    log_weights = [item.end_log_weight + math.log(item.mult) for item in provenances.values()]
+    max_log_weight = max(log_weights)
+    min_log_weight = min(log_weights)
+
+    root = Tree()
+    trace(
+        None,
+        0,
+        root,
+        with_parent,
+        provenances,
+        n_stages,
+        min_log_weight,
+        max_log_weight,
+    )
+    root.show()
+
+
+if __name__ == "__main__":
+    main()
