@@ -1,41 +1,34 @@
-from waterfall import WaterfallRunner
+import random
+import math
 import numpy as np
-import time
+from waterfall import WaterfallRunner
+import logging
 
-n_stages = 50
-n_traj = 100
-n_init = 10
-n_atoms = 1000
-target_queue_size = 100
+logger = logging.getLogger(__name__)
+np.random.seed(seed=2019)
 
 
-# This function will be called n_init times
-# to generate an ensemble of initial states.
-# Each call should generate an initial state
-# which is returned.
-def populate():
-    x = np.random.normal(size=(n_atoms, 3))
+def gen_start():
+    x = np.random.normal(size=100)
+    # x[0] will be the work per stage
     return x
 
 
-# This function will bel called to generate
-# segments of a trajectory. It should
-# take the stage, start_state, start_weight
-# and use them to generate a final_state and
-# final weight, which are returned.
 def run(stage, start_state, start_weight):
-    # Do something useful with stage, start_state, and start weight.
-    # Here, we're just gnerating random numbers
-    end_state = np.random.normal(size=(n_atoms, 3))
-    weight_fact = np.random.lognormal(sigma=4)
-    return end_state, start_weight * weight_fact
+    new_state = np.random.normal(size=100)
+    # state[0] is the work per stage
+    new_state[0] = start_state[0]
+    weight_factor = start_state[0] + np.random.normal(scale=0.2)
+    return new_state, start_weight + weight_factor
 
 
-waterfall = WaterfallRunner(
-    n_stages, n_traj, n_init, target_queue_size
-)
-waterfall.populate_method = populate
-waterfall.run_method = run
+n_stages = 20
+n_traj = 2000
+n_seed_traj = 2000
+max_queue_size = 20_000
 
-waterfall.populate()
+
+waterfall = WaterfallRunner(n_stages, max_queue_size, n_seed_traj, n_traj)
+waterfall.gen_starting_structure = gen_start
+waterfall.run_traj_segment = run
 waterfall.run()
