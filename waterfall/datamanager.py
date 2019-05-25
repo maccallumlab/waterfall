@@ -107,10 +107,11 @@ class DataManager:
         d._traj_data = None
         d._prov_data = None
         d._console_logging = console_logging
+        d.client_id = gen_random_id()
+        d._create_dirs()
         d._setup_logging()
         if os.path.exists(d._filename):
             raise RuntimeError(f"Path {d._filename} already exists.")
-        d._create_dirs()
         with open(d._filename, "wb") as f:
             pickle.dump(d, f)
 
