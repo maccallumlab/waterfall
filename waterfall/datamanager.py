@@ -93,13 +93,20 @@ class DataManager:
         self._logger = None
         self._console_logging = False
 
+    def __getstate__(self):
+        odict = self.__dict__.copy()
+        del odict["_logger"]
+        return odict
+
     @classmethod
-    def initialize(cls, n_stages):
+    def initialize(cls, n_stages, console_logging=False):
         d = cls.__new__(cls)
         d.n_stages = n_stages
         d.client_id = None
         d._traj_data = None
         d._prov_data = None
+        d._console_logging = console_logging
+        d._setup_logging()
         if os.path.exists(d._filename):
             raise RuntimeError(f"Path {d._filename} already exists.")
         d._create_dirs()

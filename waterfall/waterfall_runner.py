@@ -1,4 +1,5 @@
 from waterfall import datamanager
+import argparse
 import uuid
 import logging
 import random
@@ -35,25 +36,37 @@ class WaterfallRunner:
         self.gen_starting_structure = None
         self.run_traj_segment = None
         self._logger = None
+
+    def run(self):
+        parser = argparse.ArgumentParser(
+            description="Setup or run a waterfall simulation."
+        )
+        parser.add_argument(
+            "command", help="command to execute", choices=["init", "run"]
+        )
+        parser.add_argument(
+            "--console-logging",
+            help="log output to console instead of file",
+            default=False,
+            action="store_true",
+        )
+        args = parser.parse_args()
+
+        self.console_logging = args.console_logging
         self._setup_logging()
 
-    def run(self, command=None):
-        if command is None:
-            command = sys.argv[1]
-        if command == "init":
+        if args.command == "init":
             self._logger.info("Executing `init` command.")
             self._initialize()
-        elif command == "run":
+        else:
             self._logger.info("Executing `run` command.")
             self._run()
-        else:
-            raise RuntimeError(
-                f"""Got unknown command line argument {command}, valid options are "init" and "run"."""
-            )
 
     def _initialize(self):
         self._logger.info("Initializing DataManager with %d stages.", self.n_stages)
-        datamanager.DataManager.initialize(self.n_stages)
+        datamanager.DataManager.initialize(
+            self.n_stages, console_logging=self.console_logging
+        )
         self._datamanager = datamanager.DataManager.activate()
         self._logger.info("Seeding %d initial trajectories.", self.n_seed_traj)
         for _ in range(self.n_seed_traj):
@@ -77,7 +90,9 @@ class WaterfallRunner:
         return task
 
     def _run(self):
-        self._datamanager = datamanager.DataManager.activate()
+        self._datamanager = datamanager.DataManager.activate(
+            console_logging=self.console_logging
+        )
         while self._datamanager.n_complete < self.n_to_complete:
             self._logger.info(
                 "Running with %d complete of %d.",
