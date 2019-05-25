@@ -101,6 +101,7 @@ class DataManager:
     @classmethod
     def initialize(cls, n_stages, console_logging=False):
         d = cls.__new__(cls)
+        d.read_only = False
         d.n_stages = n_stages
         d.client_id = None
         d._traj_data = None
