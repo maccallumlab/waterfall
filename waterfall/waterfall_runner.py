@@ -1,186 +1,199 @@
-from waterfall import state
+from waterfall import datamanager
 import uuid
 import logging
 import random
 import time
 import collections
+import sys
+import math
 
 
 logger = logging.getLogger(__name__)
 
 
 class WaterfallRunner:
-    def __init__(self, n_stages, max_queue_size):
+    def __init__(
+        self,
+        n_stages,
+        max_queue_size,
+        n_seed_traj,
+        n_to_complete,
+        console_logging=False,
+        max_duration=3600,
+    ):
         self.step = 0
         self.n_stages = n_stages
         self.max_queue_size = max_queue_size
+        self.n_seed_traj = n_seed_traj
+        self.n_to_complete = n_to_complete
+        self.console_logging = console_logging
+        self.max_duration = max_duration
         self._step = 0
         self._active_task = None
         self._in_progress = None
-        self._state = state.State(self.n_stages)
-        state.init_logging(self._state, console=False, level=logging.INFO)
+        self._datamanager = None
+        self.gen_starting_structure = None
+        self.run_traj_segment = None
+        self._logger = None
+        self._setup_logging()
 
-        self.populate_method = None
-        self.run_method = None
-
-    def populate_starting_structures(self, n_starting_structures):
-        with self._state.transact():
-            n = self._state.get_num_initial_structures()
-        while n < n_starting_structures:
-            structure = self.populate_method()
-            with self._state.transact():
-                self._state.add_initial_structure(structure)
-                n = self._state.get_num_initial_structures()
-
-    def populate_init_trajectories(self, n_trajectories):
-        with self._state.transact():
-            for _ in range(n_trajectories):
-                task = state.SimulationTask(
-                    lineage=self._state.gen_new_lineage(),
-                    parent=None,
-                    struct_hash=self._state.get_random_initial_structure(),
-                    start_log_weight=0.0,
-                    stage=0,
-                    multiplicity=1,
-                    child_id=uuid.uuid4().int,
-                )
-                self._state.add_simulation_task(task)
-
-    def _choose_task(self):
-        with self._state.transact():
-            total_queued = self._state.get_total_queued()
-            self.num_completed = self._state.get_num_completed()
-            tasks = self._state.list_simulation_tasks()
-            logger.info(
-                "Running step %d, %d completed trajectories with %d queued",
-                self.step,
-                self.num_completed,
-                total_queued,
-            )
-            n = len(tasks)
-
-            # First we check for orphaned trajectories.
-            orphan = self._state.get_orphan_task()
-            if orphan:
-                logger.info("Restarting orphaned task.")
-                self._active_task = orphan
-            # If there is no orphan, then we check the queue. If there is
-            # nothing queued, we start a new trajectory.
-            elif n == 0:
-                logger.info("Starting a new trajectory")
-                self._active_task = state.SimulationTask(
-                    lineage=self._state.gen_new_lineage(),
-                    parent=None,
-                    struct_hash=self._state.get_random_initial_structure(),
-                    start_log_weight=0.0,
-                    stage=0,
-                    multiplicity=1,
-                    child_id=uuid.uuid4().int,
-                )
-            # If there are trajectories queued, we extend one of them at random.
-            else:
-                choice = random.randrange(0, n)
-                self._active_task = tasks[choice]
-                logger.info(
-                    "Continuing trajectory from parent %s", self._active_task.parent
-                )
-                self._state.remove_simulation_task(self._active_task)
-
-            # Once we get here, we have an active task.
-            self._in_progress = self._state.add_to_in_progress_queue(self._active_task)
-            start_struct = self._state.load_structure(self._active_task.struct_hash)
-            start_log_weight = self._active_task.start_log_weight
-            stage = self._active_task.stage
-        return start_struct, start_log_weight, stage
-
-    def _persist_run(self, struct_end, log_weight_end):
-        with self._state.transact():
-            # we completed this work unit, so remove it
-            self._state.remove_from_in_progress_queue(self._in_progress)
-            self._in_progress = None
-
-            # save the structure and update weights
-            struct_id_end = self._state.save_structure(struct_end)
-            for _ in range(self._active_task.multiplicity):
-                self._state.add_log_weight_observation(
-                    self._active_task.stage, log_weight_end
-                )
-            self._state.mark_visit(self._active_task.stage)
-
-            # decide on how many copies
-            copies, new_log_weight = self._state.get_copies_and_log_weight(
-                self._active_task.stage, log_weight_end
-            )
-            logger.info(
-                "New log weight %f. Trying to add %d copies", new_log_weight, copies
+    def run(self, command=None):
+        if command is None:
+            command = sys.argv[1]
+        if command == "init":
+            self._logger.info("Executing `init` command.")
+            self._initialize()
+        elif command == "run":
+            self._logger.info("Executing `run` command.")
+            self._run()
+        else:
+            raise RuntimeError(
+                f"""Got unknown command line argument {command}, valid options are "init" and "run"."""
             )
 
-            # record the provenance
-            provenance = state.ProvenanceEntry(
-                lineage=self._active_task.lineage,
-                parent=self._active_task.parent,
-                struct_start=self._active_task.struct_hash,
-                weight_start=self._active_task.start_log_weight,
-                stage=self._active_task.stage,
-                struct_end=struct_id_end,
-                weight_end=new_log_weight,
-                multiplicity=self._active_task.multiplicity,
-                copies=copies,
+    def _initialize(self):
+        self._logger.info("Initializing DataManager with %d stages.", self.n_stages)
+        datamanager.DataManager.initialize(self.n_stages)
+        self._datamanager = datamanager.DataManager.activate()
+        self._logger.info("Seeding %d initial trajectories.", self.n_seed_traj)
+        for _ in range(self.n_seed_traj):
+            task = self._gen_new_traj_start_task()
+            self._datamanager.queue_task(task)
+
+    def _gen_new_traj_start_task(self):
+        self._logger.info("Generating new starting trajectory task.")
+        task_id = self._datamanager.gen_random_id()
+        lineage = self._datamanager.gen_random_id()
+        self._logger.info("Created new lineage %s", lineage)
+        parent = None
+        struct = self.gen_starting_structure()
+        struct_id = self._datamanager.save_structure(struct)
+        log_weight = 0.0
+        stage = 0
+        multiplicity = 1
+        task = datamanager.SimulationTask(
+            task_id, lineage, parent, struct_id, log_weight, stage, multiplicity
+        )
+        return task
+
+    def _run(self):
+        self._datamanager = datamanager.DataManager.activate()
+        while self._datamanager.n_complete < self.n_to_complete:
+            self._logger.info(
+                "Running with %d complete of %d.",
+                self._datamanager.n_complete,
+                self.n_to_complete,
             )
-            prov_hash = self._state.add_provenance(provenance)
+            self._do_work()
 
-            if copies == 0:
-                logger.info("Trajectory terminated")
-            else:
-                self._state.mark_add(self._active_task.stage, copies)
+    def _do_work(self):
+        # first check if there are any orphan tasks
+        task = self._datamanager.get_orphan_task()
+        if task:
+            self._logger.info("Restarting orphan task.")
+        # if there isn't an orphan, then choose a random task from the queue
+        else:
+            task = self._datamanager.get_random_task()
+        if task:
+            self._logger.info("Running queued task.")
+        # if there isn't a task to do, then we start a new one
+        else:
+            task = self._gen_new_traj_start_task()
+            self._logger.info("Starting new trajectory.")
 
-                # Check to see how many copies we can add without exceeding queue size
-                total_queued = self._state.get_total_queued()
-                normal_copies, merged, merged_multiplicity = _calculate_merged_copies(
-                    copies, total_queued, self.max_queue_size
-                )
-                for _ in range(normal_copies):
-                    task = state.SimulationTask(
-                        lineage=self._active_task.lineage,
-                        parent=prov_hash,
-                        struct_hash=struct_id_end,
-                        start_log_weight=new_log_weight,
-                        stage=self._active_task.stage + 1,
-                        multiplicity=self._active_task.multiplicity,
-                        child_id=uuid.uuid4().int,
-                    )
-                    self._state.add_simulation_task(task)
-                if merged:
-                    task = state.SimulationTask(
-                        lineage=self._active_task.lineage,
-                        parent=prov_hash,
-                        struct_hash=struct_id_end,
-                        start_log_weight=new_log_weight,
-                        stage=self._active_task.stage + 1,
-                        multiplicity=merged_multiplicity
-                        * self._active_task.multiplicity,
-                        child_id=uuid.uuid4().int,
-                    )
-                    self._state.add_simulation_task(task)
+        # If we get here, we have a task. We add it to the in progress
+        # tasks and then we run the user supplied run function.
+        in_progress = self._datamanager.add_in_progress(task, self.max_duration)
+        struct = self._datamanager.load_structure(task.start_struct)
+        self._logger.info("Starting run of trajectory segment at stage %d.", task.stage)
+        new_struct, new_log_weight = self.run_traj_segment(
+            task.stage, struct, task.start_log_weight
+        )
+        self._logger.info("Finished run of trajectory segment.")
 
-            self._active_task = None
+        # We're done. Remove from in progress queue and store structure.
+        self._datamanager.remove_in_progress(in_progress)
+        struct_id = self._datamanager.save_structure(new_struct)
 
-    def run(self, n_traj):
-        with self._state.transact():
-            self.num_completed = self._state.get_num_completed()
+        if task.stage == self.n_stages - 1:
+            logger.info("Trajectory completed.")
+            self._datamanager.mark_complete()
+            requested_copies = 0
+            requested_weight = new_log_weight
+        else:
+            # Update the weight and compute the number of copies
+            self._datamanager.log_average[task.stage].update_weight(
+                new_log_weight, task.multiplicity
+            )
+            requested_copies, requested_weight = get_copies(
+                self.n_stages,
+                task.stage,
+                new_log_weight,
+                self._datamanager.log_average[task.stage].log_average_weight(),
+            )
 
-        while self.num_completed < n_traj:
-            self.step += 1
+        # Choose a number of regular copies and merged copies
+        current_queued = (
+            self._datamanager.n_queued_tasks + self._datamanager.n_in_progress
+        )
+        normal_copies, merged_copies = get_merged_copies(
+            self.max_queue_size, current_queued, requested_copies
+        )
+        self._logger.info("Propogating %d requested copies.", requested_copies)
+        self._logger.info("Currently %d tasks queued.", current_queued)
+        if merged_copies == 0:
+            self._logger.info("Using %d normal copies.", normal_copies)
+        else:
+            self._logger.info(
+                "Using %d normal copies and a merged copy with %d multiplicity.",
+                normal_copies,
+                merged_copies,
+            )
 
-            start_struct, start_weight, stage = self._choose_task()
-            logger.info("Running MD at stage %d", self._active_task.stage)
-            result = self.run_method(stage, start_struct, start_weight)
-            struct_end, weight_end = result
-            logger.info("MD at stage %d complete", self._active_task.stage)
+        # record the provenance
+        prov_id = datamanager.gen_random_id()
+        prov = datamanager.Provenance(
+            id=prov_id,
+            lineage=task.lineage,
+            parent=task.parent,
+            stage=task.stage,
+            start_struct=task.start_struct,
+            start_log_weight=task.start_log_weight,
+            end_struct=struct_id,
+            end_log_weight=requested_weight,
+            mult=task.multiplicity,
+            copies=requested_copies,
+        )
+        self._datamanager.save_provenance(prov)
 
-            self._persist_run(struct_end, weight_end)
+        # Add the appropriate copies to the task queue
+        if requested_copies == 0:
+            self._logger.info("Trajectory terminated at stage %d.", task.stage)
+        for _ in range(normal_copies):
+            new_task = datamanager.SimulationTask(
+                id=datamanager.gen_random_id(),
+                lineage=task.lineage,
+                parent=prov_id,
+                start_struct=struct_id,
+                start_log_weight=requested_weight,
+                stage=task.stage + 1,
+                multiplicity=task.multiplicity,
+            )
+            self._datamanager.queue_task(new_task)
+        if merged_copies:
+            new_task = datamanager.SimulationTask(
+                id=datamanager.gen_random_id(),
+                lineage=task.lineage,
+                parent=prov_id,
+                start_struct=struct_id,
+                start_log_weight=requested_weight,
+                stage=task.stage + 1,
+                multiplicity=task.multiplicity * merged_copies,
+            )
+            self._datamanager.queue_task(new_task)
 
-        logger.info("Worker finished normally")
+    def _setup_logging(self):
+        self._logger = logging.getLogger(__name__)
 
 
 def _calculate_merged_copies(requested_copies, total_queued, max_queue_size):
@@ -200,3 +213,28 @@ def _calculate_merged_copies(requested_copies, total_queued, max_queue_size):
             merged_multiplicity,
         )
         return normal_copies, merged, merged_multiplicity
+
+
+def get_copies(n_stages, stage, log_weight, log_average_weight):
+    if stage == n_stages - 1:
+        return 0, log_weight
+    elif stage >= 0 and stage < n_stages - 1:
+        ratio = math.exp(log_weight - log_average_weight)
+        lower = math.floor(ratio)
+        upper = math.ceil(ratio)
+        frac = ratio - lower
+        if random.random() < frac:
+            return int(upper), log_average_weight
+        else:
+            return int(lower), log_average_weight
+    else:
+        raise ValueError("stage > (n_stages - 1)")
+
+
+def get_merged_copies(max_queued, current_queued, requested_copies):
+    if current_queued + requested_copies <= max_queued:
+        return requested_copies, 0
+    else:
+        merged_copies = requested_copies + current_queued - max_queued
+        normal_copies = requested_copies - merged_copies
+    return normal_copies, merged_copies

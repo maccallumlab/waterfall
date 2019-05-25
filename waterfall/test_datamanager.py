@@ -313,3 +313,23 @@ def test_can_add_provenances_multiple_client():
         assert provs1[1] == prov1 or provs1[1] == prov2
         assert provs2[0] == prov1 or provs2[0] == prov2
         assert provs2[1] == prov1 or provs2[1] == prov2
+
+#
+# Track completed
+#
+def test_track_completed():
+    with in_temp():
+        datamanager.DataManager.initialize(N_STAGES)
+        d1 = datamanager.DataManager.activate()
+        d2 = datamanager.DataManager.activate()
+
+        assert d1.n_complete == 0
+        assert d2.n_complete == 0
+
+        d1.mark_complete()
+        d2.mark_complete()
+
+        assert d1.n_complete == 2
+        assert d2.n_complete == 2
+
+

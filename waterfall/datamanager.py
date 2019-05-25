@@ -5,6 +5,7 @@ import glob
 import random
 import time
 import math
+import logging
 from collections import namedtuple
 
 
@@ -27,7 +28,7 @@ lineage : string
     Each simulation started from the top is given a unique random uuid.
     This is maintained by all children.
 parent : string
-    The hash of the parent ProvenanceEntry. This is `None` for simulations
+    The hash of the parent Provenance. This is `None` for simulations
     started from the top stage.
 stage : int
     The stage of the calculation: 0 for the top stage, n_stages-1 for the bottom.
@@ -60,7 +61,7 @@ lineage : string
     Each simulation started from the top is given a unique random uuid.
     This is maintained by all children.
 parent : string
-    The id of the parent ProvenanceEntry. This is `None` for simulations
+    The id of the parent Provenance. This is `None` for simulations
     started from the top stage.
 start_struct : StructureId
     The starting structure.
@@ -85,10 +86,12 @@ def gen_random_id():
 class DataManager:
     _filename = "Data/datamanager"
 
-    def __init__(self, n_stages):
+    def __init__(self):
         raise RuntimeError(
             "Do not create a DataManager directly. Call DataManager.activate() instead."
         )
+        self._logger = None
+        self._console_logging = False
 
     @classmethod
     def initialize(cls, n_stages):
@@ -104,7 +107,7 @@ class DataManager:
             pickle.dump(d, f)
 
     @classmethod
-    def activate(cls, read_only=False, client_id=None):
+    def activate(cls, read_only=False, client_id=None, console_logging=False):
         with open(cls._filename, "rb") as f:
             d = pickle.load(f)
         d.read_only = read_only
@@ -114,6 +117,9 @@ class DataManager:
         ]
         d._traj_data = TrajectoryStore(d.client_id)
         d._prov_data = ProvStore(d.client_id)
+        d._my_complete = 0
+        d._console_logging = console_logging
+        d._setup_logging()
         return d
 
     def gen_random_id(self):
@@ -127,6 +133,45 @@ class DataManager:
         os.makedirs("Data/Log")
         os.makedirs("Data/Traj")
         os.makedirs("Data/Prov")
+        os.makedirs("Data/Count")
+
+    def _setup_logging(self):
+        if self._console_logging or self.read_only:
+            logging.basicConfig(
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        else:
+            logging.basicConfig(
+                filename=f"Data/Log/{self.client_id}.log",
+                level=logging.INFO,
+                format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+                datefmt="%Y-%m-%d %H:%M:%S",
+            )
+        self._logger = logging.getLogger(__name__)
+
+    #
+    # Track completed
+    #
+    @property
+    def n_complete(self):
+        filenames = glob.glob("Data/Count/*_completed.dat")
+        # exclude our file
+        filenames = [
+            f for f in filenames if f != f"Data/Count/{self.client_id}_completed.dat"
+        ]
+        count = self._my_complete
+        for fn in filenames:
+            count += int(open(fn).read())
+        return count
+
+    def mark_complete(self):
+        basename = f"Data/Count/{self.client_id}_completed"
+        self._my_complete += 1
+        with open(basename + ".tmp", "w") as f:
+            f.write(f"{self._my_complete}")
+        os.rename(basename + ".tmp", basename + ".dat")
 
     #
     # Task queuing
@@ -215,7 +260,7 @@ class DataManager:
                     if time.time() > in_progress.deadline:
                         self.remove_in_progress(filename)
                         return in_progress.task
-            except FileNotFoundError:
+            except (FileNotFoundError, EOFError):
                 return self.get_orphan_task(retries - 1)
         return None
 
@@ -239,7 +284,7 @@ class DataManager:
     def save_provenance(self, prov):
         if self.read_only:
             assert RuntimeError("DataManager was activated as read only.")
-        return self._prov_data.save_provenance(prov)
+        self._prov_data.save_provenance(prov)
 
     def get_provenances(self):
         return self._prov_data.get_provenances()
