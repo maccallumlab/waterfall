@@ -200,20 +200,21 @@ class DataManager:
             pickle.dump(task, f)
         os.rename(basename + ".tmp", basename + ".dat")
 
-    def get_random_task(self, retries=50):
+    def get_random_task(self):
         if self.read_only:
             assert RuntimeError("DataManager was activated as read only.")
-        if retries < 0:
-            raise RuntimeError("Exceed retries while in `get_random_task`.")
-        try:
-            task_ids = self._get_queued_task_ids()
-            if not task_ids:
-                return None
-            else:
-                task_id = random.choice(task_ids)
-                return self._dequeue_task(task_id)
-        except TaskNotFoundError:
-            return self.get_random_task(retries - 1)
+        for retry in range(50):
+            try:
+                task_ids = self._get_queued_task_ids()
+                if not task_ids:
+                    return None
+                else:
+                    task_id = random.choice(task_ids)
+                    return self._dequeue_task(task_id)
+            except TaskNotFoundError:
+                time.sleep(1)
+                continue
+        raise RuntimeError("Exceed retries while in `get_random_task`.")
 
     def _get_queued_task_ids(self):
         files = glob.glob("Data/Queue/*.dat")
@@ -257,23 +258,23 @@ class DataManager:
             assert RuntimeError("DataManager was activated as read only.")
         os.unlink(in_progress_id)
 
-    def get_orphan_task(self, retries=50):
+    def get_orphan_task(self):
         if self.read_only:
             assert RuntimeError("DataManager was activated as read only.")
-        if retries < 0:
-            raise RuntimeError("Exceed retries while in `get_orphan_task`.")
-        filenames = self._get_in_progress()
-        random.shuffle(filenames)
-        for filename in filenames:
-            try:
-                with open(filename, "rb") as f:
-                    in_progress = pickle.load(f)
-                    if time.time() > in_progress.deadline:
-                        self.remove_in_progress(filename)
-                        return in_progress.task
-            except (FileNotFoundError, EOFError):
-                return self.get_orphan_task(retries - 1)
-        return None
+        for retry in range(50):
+            filenames = self._get_in_progress()
+            random.shuffle(filenames)
+            for filename in filenames:
+                try:
+                    with open(filename, "rb") as f:
+                        in_progress = pickle.load(f)
+                        if time.time() > in_progress.deadline:
+                            self.remove_in_progress(filename)
+                            return in_progress.task
+                except (FileNotFoundError, EOFError):
+                    continue
+            return None
+        raise RuntimeError("Exceed retries while in `get_orphan_task`.")
 
     #
     # Structures
@@ -375,18 +376,19 @@ class TrajectoryStore:
             )
         return structure_id
 
-    def load_structure(self, structure_id, retries=50):
-        if retries < 0:
-            raise RuntimeError("Exceed retries while in `load_structure`.")
-        try:
-            with open(structure_id.file, "rb") as f:
-                f.seek(structure_id.offset)
-                data = f.read(structure_id.size)
-            id, structure = pickle.loads(data)
-            assert id == structure_id.id
-            return structure
-        except:
-            return self.load_structure(structure_id, retries-1)
+    def load_structure(self, structure_id):
+        for retry in range(50):
+            try:
+                with open(structure_id.file, "rb") as f:
+                    f.seek(structure_id.offset)
+                    data = f.read(structure_id.size)
+                id, structure = pickle.loads(data)
+                assert id == structure_id.id
+                return structure
+            except:
+                time.sleep(1)
+                continue
+        raise RuntimeError("Exceed retries while in `load_structure`.")
 
     def get_structure_ids(self):
         filenames = glob.glob("Data/Traj/*.txt")
