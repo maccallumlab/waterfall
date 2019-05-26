@@ -373,13 +373,18 @@ class TrajectoryStore:
             )
         return structure_id
 
-    def load_structure(self, structure_id):
-        with open(structure_id.file, "rb") as f:
-            f.seek(structure_id.offset)
-            data = f.read(structure_id.size)
-        id, structure = pickle.loads(data)
-        assert id == structure_id.id
-        return structure
+    def load_structure(self, structure_id, retries=50):
+        if retries < 0:
+            raise RuntimeError("Exceed retries while in `load_structure`.")
+        try:
+            with open(structure_id.file, "rb") as f:
+                f.seek(structure_id.offset)
+                data = f.read(structure_id.size)
+            id, structure = pickle.loads(data)
+            assert id == structure_id.id
+            return structure
+        except:
+            return self.load_structure(structure_id, retries-1)
 
     def get_structure_ids(self):
         filenames = glob.glob("Data/Traj/*.txt")
