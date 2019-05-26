@@ -225,7 +225,7 @@ class DataManager:
                 result = pickle.load(f)
             os.unlink(task_name)
             return result
-        except FileNotFoundError:
+        except (FileNotFoundError, EOFError):
             raise TaskNotFoundError(f"Task {task_name} not found.")
 
     #
