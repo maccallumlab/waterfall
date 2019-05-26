@@ -143,6 +143,8 @@ class DataManager:
         os.makedirs("Data/Traj")
         os.makedirs("Data/Prov")
         os.makedirs("Data/Count")
+        for stage in range(self.n_stages):
+            os.makedirs(f"Data/Weight/Stage_{stage}")
 
     def _setup_logging(self):
         if self._console_logging or self.read_only:
@@ -314,7 +316,7 @@ class LogAverageWeight:
         self.stage = stage
         self._log_sum = -math.inf
         self._count = 0
-        self._basename = f"Data/Weight/{client_id}_stage_{stage}"
+        self._basename = f"Data/Weight/Stage_{stage}/{client_id}"
         self._pickle()
 
     def update_weight(self, log_weight, multiplicity):
@@ -326,7 +328,7 @@ class LogAverageWeight:
     def log_average_weight(self):
         log_sum = self._log_sum
         count = self._count
-        filenames = glob.glob(f"Data/Weight/*_stage_{self.stage}.dat")
+        filenames = glob.glob(f"Data/Weight/Stage_{self.stage}/*.dat")
         # Skip our own file
         filenames = [f for f in filenames if not f == self._basename + ".dat"]
         for fn in filenames:
