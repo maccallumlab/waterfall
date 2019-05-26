@@ -16,5 +16,6 @@ setup(
         "scripts/compute_effective_sample_size",
         "scripts/count_lineages",
         "scripts/trace_ancestry",
+        "scripts/count_provenances",
     ],
 )

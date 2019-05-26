@@ -1,0 +1,14 @@
+from waterfall import datamanager
+import numpy as np
+import math
+from collections import Counter
+
+dm = datamanager.DataManager.activate(read_only=True)
+n_stages = dm.n_stages
+
+provenances = dm.get_provenances()
+stages = [p.stage for p in provenances]
+count = Counter(stages)
+
+for i in range(n_stages):
+    print(i, count[i])
