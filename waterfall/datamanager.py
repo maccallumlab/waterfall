@@ -92,6 +92,7 @@ class DataManager:
         )
         self._logger = None
         self._console_logging = False
+        self.trajectory_factory = None
 
     def __getstate__(self):
         odict = self.__dict__.copy()
@@ -99,10 +100,11 @@ class DataManager:
         return odict
 
     @classmethod
-    def initialize(cls, n_stages, console_logging=False):
+    def initialize(cls, n_stages, trajectory_factory=None, console_logging=False):
         d = cls.__new__(cls)
         d.read_only = False
         d.n_stages = n_stages
+        d.trajectory_factory = trajectory_factory
         d.client_id = None
         d._traj_data = None
         d._prov_data = None
