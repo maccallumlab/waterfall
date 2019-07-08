@@ -388,7 +388,9 @@ class TrajectoryStore:
             except:
                 time.sleep(1)
                 continue
-        raise RuntimeError("Exceed retries while in `load_structure`.")
+        raise RuntimeError(
+            f"Exceed retries while in `load_structure` at {structure_id}."
+        )
 
     def get_structure_ids(self):
         filenames = glob.glob("Data/Traj/*.txt")
