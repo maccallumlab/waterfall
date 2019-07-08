@@ -100,11 +100,11 @@ class DataManager:
         return odict
 
     @classmethod
-    def initialize(cls, n_stages, trajectory_factory=None, console_logging=False):
+    def initialize(cls, n_stages, trajectory_writer=None, console_logging=False):
         d = cls.__new__(cls)
         d.read_only = False
         d.n_stages = n_stages
-        d.trajectory_factory = trajectory_factory
+        d.trajectory_writer = trajectory_writer
         d.client_id = None
         d._traj_data = None
         d._prov_data = None

@@ -35,7 +35,7 @@ class WaterfallRunner:
         self._datamanager = None
         self.gen_starting_structure = None
         self.run_traj_segment = None
-        self.trajectory_factory = None
+        self.trajectory_writer = None
         self._logger = None
 
     def run(self):
@@ -66,7 +66,7 @@ class WaterfallRunner:
     def _initialize(self):
         self._logger.info("Initializing DataManager with %d stages.", self.n_stages)
         datamanager.DataManager.initialize(
-            self.n_stages, self.trajectory_factory, console_logging=self.console_logging
+            self.n_stages, self.trajectory_writer, console_logging=self.console_logging
         )
         self._datamanager = datamanager.DataManager.activate()
         self._logger.info("Seeding %d initial trajectories.", self.n_seed_traj)
