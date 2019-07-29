@@ -363,6 +363,8 @@ class TrajectoryStore:
         data = pickle.dumps((id, structure))
         size = len(data)
 
+        logging.getLogger(__name__).info(f"Writing {size} bytes at offset {self._offset}.")
+
         # We're going to try writing up to 50 times in order
         # to work around a filesystem bug with CEPH. We'll
         # write the data, then read it back in to make sure
@@ -372,7 +374,10 @@ class TrajectoryStore:
                 if retry == 0:
                     f.seek(0, os.SEEK_END)
                     pos = f.tell()
-                    assert pos == self._offset
+                    if pos != self._offset:
+                        raise RuntimeError(
+                            f"Position {pos} does not match _offset {self._offset}."
+                        )
                 else:
                     f.seek(self._offset)
                 f.write(data)
