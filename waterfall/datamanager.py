@@ -123,6 +123,7 @@ class DataManager:
             d = pickle.load(f)
         d.read_only = read_only
         d.client_id = client_id if client_id is not None else gen_random_id()
+        print(f"Data manager activated. Client id is {d.client_id}.")
         d.log_average = [
             LogAverageWeight(d.client_id, i) for i in range(d.n_stages - 1)
         ]
@@ -361,22 +362,42 @@ class TrajectoryStore:
         id = gen_random_id()
         data = pickle.dumps((id, structure))
         size = len(data)
-        # update the data file
-        with open(self._datafile, "ab") as f:
-            f.seek(0, os.SEEK_END)
-            pos = f.tell()
-            assert pos == self._offset
-            f.write(data)
-        structure_id = StructureId(id, self._datafile, self._offset, size)
-        self._offset += size
-        # update the ledger
-        with open(self._ledgerfile, "a") as f:
-            f.seek(0, os.SEEK_END)
-            print(
-                f"{structure_id.id} {structure_id.file} {structure_id.offset} {structure_id.size}",
-                file=f,
-            )
-        return structure_id
+
+        # We're going to try writing up to 50 times in order
+        # to work around a filesystem bug with CEPH. We'll
+        # write the data, then read it back in to make sure
+        # that it matches.
+        for retry in range(50):
+            with open(self._datafile, "ab") as f:
+                if retry == 0:
+                    f.seek(0, os.SEEK_END)
+                    pos = f.tell()
+                    assert pos == self._offset
+                else:
+                    f.seek(self._offset)
+                f.write(data)
+
+            # Make sure that data is written correctly to work around
+            # fileystem bug.
+            with open(self._datafile, "rb") as f:
+                f.seek(self._offset)
+                data_written = f.read(size)
+            if data_written != data:
+                logging.getLogger(__name__).info("Error saving structure. Retrying")
+                time.sleep(1)
+                continue
+
+            structure_id = StructureId(id, self._datafile, self._offset, size)
+            self._offset += size
+            # update the ledger
+            with open(self._ledgerfile, "a") as f:
+                f.seek(0, os.SEEK_END)
+                print(
+                    f"{structure_id.id} {structure_id.file} {structure_id.offset} {structure_id.size}",
+                    file=f,
+                )
+            return structure_id
+        raise RuntimeError("Error saving structure. Unsuccessfully retried 50 times.")
 
     def load_structure(self, structure_id):
         for retry in range(50):
