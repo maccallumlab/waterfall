@@ -92,7 +92,7 @@ class DataManager:
         )
         self._logger = None
         self._console_logging = False
-        self.trajectory_factory = None
+        self.trajectory_writer = None
 
     def __getstate__(self):
         odict = self.__dict__.copy()
@@ -354,8 +354,10 @@ class LogAverageWeight:
 class TrajectoryStore:
     def __init__(self, client_id):
         self.client_id = client_id
-        self._datafile = f"Data/Traj/{self.client_id}.dat"
-        self._ledgerfile = f"Data/Traj/{self.client_id}.txt"
+        self._data_filename = f"Data/Traj/{self.client_id}.dat"
+        self._ledger_filename = f"Data/Traj/{self.client_id}.txt"
+        self._datafile = open(self._data_filename, "wb")
+        self._ledgerfile = open(self._ledger_filename, "w")
         self._offset = 0
 
     def save_structure(self, structure):
@@ -363,46 +365,25 @@ class TrajectoryStore:
         data = pickle.dumps((id, structure))
         size = len(data)
 
-        logging.getLogger(__name__).info(f"Writing {size} bytes at offset {self._offset}.")
+        logging.getLogger(__name__).info(
+            f"Writing {size} bytes at offset {self._offset}."
+        )
 
-        # We're going to try writing up to 50 times in order
-        # to work around a filesystem bug with CEPH. We'll
-        # write the data, then read it back in to make sure
-        # that it matches.
-        for retry in range(50):
-            with open(self._datafile, "ab") as f:
-                if retry == 0:
-                    f.seek(0, os.SEEK_END)
-                    pos = f.tell()
-                    if pos != self._offset:
-                        raise RuntimeError(
-                            f"Position {pos} does not match _offset {self._offset}."
-                        )
-                else:
-                    f.seek(self._offset)
-                f.write(data)
+        # Write and flush file
+        self._datafile.write(data)
+        self._datafile.flush()
 
-            # Make sure that data is written correctly to work around
-            # fileystem bug.
-            with open(self._datafile, "rb") as f:
-                f.seek(self._offset)
-                data_written = f.read(size)
-            if data_written != data:
-                logging.getLogger(__name__).info("Error saving structure. Retrying")
-                time.sleep(1)
-                continue
+        # Create new StructureId
+        structure_id = StructureId(id, self._data_filename, self._offset, size)
+        self._offset += size
 
-            structure_id = StructureId(id, self._datafile, self._offset, size)
-            self._offset += size
-            # update the ledger
-            with open(self._ledgerfile, "a") as f:
-                f.seek(0, os.SEEK_END)
-                print(
-                    f"{structure_id.id} {structure_id.file} {structure_id.offset} {structure_id.size}",
-                    file=f,
-                )
-            return structure_id
-        raise RuntimeError("Error saving structure. Unsuccessfully retried 50 times.")
+        # Update the ledger
+        print(
+            f"{structure_id.id} {structure_id.file} {structure_id.offset} {structure_id.size}",
+            file=self._ledgerfile,
+        )
+        self._ledgerfile.flush()
+        return structure_id
 
     def load_structure(self, structure_id):
         for retry in range(50):
@@ -439,18 +420,18 @@ class TrajectoryStore:
 class ProvStore:
     def __init__(self, client_id):
         self.client_id = client_id
-        self._ledgerfile = f"Data/Prov/{self.client_id}.txt"
+        self._ledger_filename = f"Data/Prov/{self.client_id}.txt"
+        self._ledgerfile = open(self._ledger_filename, "w")
 
     def save_provenance(self, p):
-        with open(self._ledgerfile, "a") as f:
-            f.seek(0, os.SEEK_END)
-            print(
-                f"{p.id} {p.lineage} {p.parent} {p.stage} "
-                f"{p.start_struct.id} {p.start_struct.file} {p.start_struct.offset} {p.start_struct.size} {p.start_log_weight} "
-                f"{p.end_struct.id} {p.end_struct.file} {p.end_struct.offset} {p.end_struct.size} {p.end_log_weight} "
-                f"{p.mult} {p.copies}",
-                file=f,
-            )
+        print(
+            f"{p.id} {p.lineage} {p.parent} {p.stage} "
+            f"{p.start_struct.id} {p.start_struct.file} {p.start_struct.offset} {p.start_struct.size} {p.start_log_weight} "
+            f"{p.end_struct.id} {p.end_struct.file} {p.end_struct.offset} {p.end_struct.size} {p.end_log_weight} "
+            f"{p.mult} {p.copies}",
+            file=self._ledgerfile,
+        )
+        self._ledgerfile.flush()
 
     def get_provenances(self):
         filenames = glob.glob("Data/Prov/*.txt")
