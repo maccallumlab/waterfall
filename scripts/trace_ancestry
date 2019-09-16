@@ -1,7 +1,12 @@
-from ete3 import Tree, NodeStyle
-from waterfall import datamanager
+from ete3 import Tree, NodeStyle, TreeStyle
+import waterfall
+from waterfall import vault
 from collections import defaultdict
 import math
+import numpy as np
+
+
+log_weights = defaultdict(list)
 
 
 def RGB_to_hex(RGB):
@@ -13,57 +18,62 @@ def RGB_to_hex(RGB):
     )
 
 
-def trace(
-    hash, level, parent_node, with_parent, provenances, n_stages, min_weight, max_weight
-):
-    for item in with_parent[hash]:
-        node = parent_node.add_child()
-        w = provenances[item].end_log_weight
-        rel_w = w - max_weight
-        w = math.exp(rel_w)
-        color = RGB_to_hex((0, 255 * w, 0))
-        node.img_style["fgcolor"] = color
-        c = provenances[item].copies
-        if c == 0 and level < n_stages - 1:
-            node.img_style["fgcolor"] = "red"
-        trace(
-            item,
-            level + 1,
-            node,
-            with_parent,
-            provenances,
-            n_stages,
-            min_weight,
-            max_weight,
-        )
+def trace(node, parent):
+    new_node = node.add_child()
+    cont = True if parent.copies > 0 else False
+    new_node.add_features(stage=parent.stage, log_weight=parent.work, cont=cont)
+    log_weights[parent.stage].append(parent.work)
+    for child in parent.children:
+        trace(new_node, child)
+
+
+def normalize(value, min_, max_):
+    delta = max_ - min_
+    if delta == 0.0:
+        norm = 1.0
+    else:
+        norm = (value - min_) / delta
+    return 1.0 - norm
+
+
+def color(value):
+    return RGB_to_hex((200, 200 * value, 200 * value))
 
 
 def main():
-    dm = datamanager.DataManager.activate(read_only=True)
-    n_stages = dm.n_stages
-
-    # get all of the provenances
-    provenances = {p.id: p for p in dm.get_provenances()}
-    with_parent = defaultdict(list)
-    for p in provenances.values():
-        with_parent[p.parent].append(p.id)
-
-    log_weights = [item.end_log_weight + math.log(item.mult) for item in provenances.values()]
-    max_log_weight = max(log_weights)
-    min_log_weight = min(log_weights)
+    store = vault.connect_db_readonly()
+    w = waterfall.Waterfall.load()
 
     root = Tree()
-    trace(
-        None,
-        0,
-        root,
-        with_parent,
-        provenances,
-        n_stages,
-        min_log_weight,
-        max_log_weight,
-    )
-    root.show()
+    root.add_features(stage=-1, log_weight=0.0, cont=True)
+
+    starts = store.get_traj_starts()
+    for start in starts:
+        trace(root, start)
+
+    # compute the range of log_weights
+    max_log_weights = {}
+    min_log_weights = {}
+    for key in log_weights:
+        max_log_weights[key] = np.max(log_weights[key])
+        min_log_weights[key] = np.min(log_weights[key])
+
+    for n in root.traverse():
+        if n.cont or n.stage == (w.n_stages - 1):
+            n.img_style["fgcolor"] = color(
+                # normalize(n.log_weight, min_log_weights[n.stage], max_log_weights[n.stage])
+                normalize(
+                    n.log_weight,
+                    np.min(list(min_log_weights.values())),
+                    np.max(list(max_log_weights.values())),
+                )
+            )
+        else:
+            n.img_style["fgcolor"] = "black"
+
+    style = TreeStyle()
+    style.rotation = 90
+    root.show(tree_style=style)
 
 
 if __name__ == "__main__":

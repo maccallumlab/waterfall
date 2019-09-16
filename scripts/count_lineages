@@ -1,19 +1,33 @@
-from waterfall import datamanager
+from waterfall import vault
 from collections import Counter
 
-dm = datamanager.DataManager.activate(read_only=True)
-n_stages = dm.n_stages
 
-lineages = Counter()
+def count_children_recursive(node):
+    children = node.children
+    count = 1
+    for child in children:
+        count += count_children_recursive(child)
+    return count
 
-provenances = dm.get_provenances()
-for p in provenances:
-    if p.stage == n_stages - 1:
-        lineages[p.lineage] += 1
+store = vault.connect_db_readonly()
 
-print(lineages)
-print()
-print(len(lineages))
-print()
-print(lineages.most_common())
-print()
+lineages = store.get_traj_starts()
+for lin in lineages:
+    print(lin, count_children_recursive(lin))
+
+# dm = datamanager.DataManager.activate(read_only=True)
+# n_stages = dm.n_stages
+# 
+# lineages = Counter()
+# 
+# provenances = dm.get_provenances()
+# for p in provenances:
+#     if p.stage == n_stages - 1:
+#         lineages[p.lineage] += 1
+# 
+# print(lineages)
+# print()
+# print(len(lineages))
+# print()
+# print(lineages.most_common())
+# print()

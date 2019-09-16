@@ -2,9 +2,7 @@ import random
 import math
 import numpy as np
 from waterfall import WaterfallRunner
-import logging
 
-logger = logging.getLogger(__name__)
 np.random.seed(seed=2019)
 
 
@@ -28,7 +26,5 @@ n_seed_traj = 2000
 max_queue_size = 20_000
 
 
-waterfall = WaterfallRunner(n_stages, max_queue_size, n_seed_traj, n_traj)
-waterfall.gen_starting_structure = gen_start
-waterfall.run_traj_segment = run
+waterfall = WaterfallRunner(gen_start, run)
 waterfall.run()
