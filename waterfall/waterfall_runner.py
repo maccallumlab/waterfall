@@ -3,7 +3,7 @@ import random
 import pickle
 import uuid
 import os
-from waterfall import Waterfall, WaterfallTask, vault
+from waterfall import Waterfall, vault
 import requests
 import logging
 
@@ -23,6 +23,7 @@ class WaterfallRunner:
         init_parser.add_argument("--n_stages", type=int, required=True)
         init_parser.add_argument("--n_seed", type=int, required=True)
         init_parser.add_argument("--n_traj", type=int, required=True)
+        init_parser.add_argument("--n_batch", type=int, required=True)
         init_parser.add_argument("--max_queue", type=int, default=20000)
 
         server_parser = subparsers.add_parser("server", help="run as server")
@@ -40,6 +41,7 @@ class WaterfallRunner:
                 n_stages=args.n_stages,
                 n_seed=args.n_seed,
                 n_traj=args.n_traj,
+                batch_size=args.n_batch,
                 max_queue=args.max_queue,
             )
         elif args.command == "server":
@@ -61,9 +63,9 @@ class WaterfallRunner:
                     f"Could not connect to server. Response code was {response}."
                 )
 
-    def _initialize(self, n_stages, n_seed, n_traj, max_queue):
-        w = Waterfall(n_stages, n_traj, max_queue)
-        store = vault.create_db()
+    def _initialize(self, n_stages, n_seed, n_traj, batch_size, max_queue):
+        w = Waterfall(n_stages, n_traj, batch_size, max_queue)
+        store = vault.create_db(w)
         w.store = store
         logging.basicConfig(level=logging.INFO, filename="Data/Logs/server.log")
         logger = logging.getLogger(__name__)

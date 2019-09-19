@@ -5,34 +5,40 @@ import jsonpickle
 import argparse
 import numpy as np
 from flask import Flask, request
-from flask_restful import Resource, Api
+import logging
+
+# hide werkzeug logging messages
+# log = logging.getLogger('werkzeug')
+# log.setLevel(logging.ERROR)
+app = Flask(__name__)
 
 
-class Ping(Resource):
-    def get(self):
-        return None
+@app.route("/ping", methods=["GET"])
+def ping():
+    return "Ping"
 
 
-class WorkUnit(Resource):
-    def get(self):
-        t = w.get_task()
-        return jsonpickle.encode(t)
+@app.route("/work_unit", methods=["GET"])
+def get_work_unit():
+    t = w.get_task()
+    return jsonpickle.encode(t)
 
 
-class PostResult(Resource):
-    def post(self):
-        result = jsonpickle.decode(request.data)
-        w.add_result(result)
-        if w.n_completed_traj >= w.n_traj:
-            _cleanup()
-            request.environ.get("werkzeug.server.shutdown")()
-
-
-class Kill(Resource):
-    def get(self):
+@app.route("/post_result", methods=["POST"])
+def post_result():
+    result = jsonpickle.decode(request.data)
+    w.add_result(result)
+    if w.kill:
         _cleanup()
         request.environ.get("werkzeug.server.shutdown")()
-        return "Server shutting down"
+    return "Result posted"
+
+
+@app.route("/kill", methods=["GET"])
+def kill():
+    _cleanup()
+    request.environ.get("werkzeug.server.shutdown")()
+    return "Server shutting down"
 
 
 def _cleanup():
@@ -48,31 +54,25 @@ logger = logging.getLogger(__name__)
 # load global waterfall state
 w = waterfall.Waterfall.load()
 
+
 def _check_lock():
     if os.path.exists("waterfall.lock"):
         raise RuntimeError()
     open("waterfall.lock", "w").close()
 
+
 def _write_url(host, port):
     with open("waterfall.url", "w") as outfile:
         print(f"http://{host}:{port}", file=outfile)
 
+
 def run(host, port):
     _check_lock()
 
-    # wire up flask
-    app = Flask(__name__)
-    api = Api(app)
-    api.add_resource(Ping, "/ping")
-    api.add_resource(WorkUnit, "/work_unit")
-    api.add_resource(PostResult, "/post_result")
-    api.add_resource(Kill, "/kill")
-
-    # hide werkzeug logging messages
-    import logging
-    log = logging.getLogger('werkzeug')
-    log.setLevel(logging.ERROR)
-
     logger.info(f"Starting server on {host}:{port}")
     _write_url(host, port)
-    app.run(host=host, port=port)
+    app.run(host=host, port=port, threaded=False)
+
+    @app.teardown_appcontext
+    def shutdown_session(exception=None):
+        w.store.DBSession.remove()

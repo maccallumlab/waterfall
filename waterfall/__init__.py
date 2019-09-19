@@ -13,17 +13,26 @@ __version__ = "0.0.1"
 
 
 class Waterfall:
-    def __init__(self, n_stages, n_traj, max_queue, max_duration=3600):
+    def __init__(self, n_stages, n_traj, batch_size, max_queue, max_duration=3600):
         self.n_stages = n_stages
         self.n_traj = n_traj
         self.n_completed_traj = 0
         self.max_queue = max_queue
+        self.batch_size = batch_size
         self.max_duration = max_duration
+
         self.work_queue = []
+        for _ in range(n_stages):
+            self.work_queue.append([])
+
         self.in_progress = {}
         self.start_states = []
         self.weights = [LogAverageWeight() for _ in range(self.n_stages)]
+        self.counts = [0 for _ in range(self.n_stages)]
         self.store = None
+        self.drain = False
+        self.kill = False
+
         self._create_dirs()
 
     def save(self):
@@ -39,12 +48,12 @@ class Waterfall:
     def load(cls):
         with open("Data/waterfall.dat", "rb") as f:
             w = pickle.loads(f.read())
-        w.store = vault.connect_db()
+        w.store = vault.connect_db(w)
         return w
 
     @property
     def n_queued(self):
-        return len(self.work_queue)
+        return sum(len(self.work_queue[i]) for i in range(self.n_stages))
 
     def add_start_state(self, start_states):
         self.start_states.append(start_states)
@@ -52,8 +61,10 @@ class Waterfall:
     def get_random_start_state(self):
         return random.choice(self.start_states)
 
-    def add_task(self, task):
-        self.work_queue.append(task)
+    def add_task(self, stage, task):
+        if isinstance(task, SolidTask):
+            self.counts[stage] += 1
+        self.work_queue[stage].append(task)
 
     def get_task(self):
         task = self._get_orphan_task()
@@ -61,14 +72,15 @@ class Waterfall:
             logger.info("Restarting orphan task.")
         else:
             # There wasn't an orphaned task, so we check the task queue
-            task = self._get_random_task()
+            task = self._get_next_task()
         if task:
             logger.info("Running queued task.")
         else:
-            # There were no tasks in the queue, so we start a new simulation
-            # from scratch.
-            logger.info("Starting new trajectory.")
-            task = self.get_new_start_task()
+            # There were no tasks in the queue, so we start a new batch of
+            # simulations from scratch.
+            logger.info("Starting new trajectory batch.")
+            self.gen_new_start_batch()
+            task = self.work_queue[0].pop()
         self._add_in_progress(task)
         return task
 
@@ -87,26 +99,86 @@ class Waterfall:
                 return task
         return None
 
-    def _get_random_task(self):
-        if self.work_queue:
-            return self.work_queue.pop(random.randrange(len(self.work_queue)))
-        else:
-            return None
+    def _get_next_task(self):
+        for stage in range(self.n_stages):
+            # Skip over empty levels.
+            if not self.work_queue[stage]:
+                continue
+            # Make sure all tasks are solid.
+            self._solidify_queue(stage)
+            # Skip over level if there are no tasks after solidifying.
+            if not self.work_queue[stage]:
+                continue
+            # Return a random task from this level.
+            return self.work_queue[stage].pop(
+                random.randrange(len(self.work_queue[stage]))
+            )
+        # If we get here, there was nothing for us to do.
+        # We will end up generting a new start task
+        return None
 
-    def get_new_start_task(self):
+    def _solidify_queue(self, stage):
+        logger.info(f"Solidifying queue level {stage}.")
+        tasks = self.work_queue[stage]
+        new_tasks = []
+        for task in tasks:
+            if isinstance(task, SolidTask):
+                new_tasks.append(task)
+            else:
+                # Compute the number of copies by comparing the
+                # weight to the average weight.
+                requested_copies, requested_log_weight = get_copies(
+                    task.log_weight, self.weights[task.stage - 1].log_average
+                )
+                print(task, requested_copies)
+                # If necessary, merge some copies so that the queue doesn't
+                # get too large.
+                normal_copies, merged_copies = get_merged_copies(
+                    self.max_queue, self.n_queued, requested_copies
+                )
+                logger.info(
+                    f"Adding {normal_copies} normal copies and {merged_copies} merged copies."
+                )
+
+                # Update the number of copies in the database.
+                self.store.update_copies(task.parent_id, requested_copies)
+
+                # add the solid tasks
+                for _ in range(normal_copies):
+                    new_task = SolidTask(
+                        task.stage,
+                        task.parent_id,
+                        requested_log_weight,
+                        task.multiplicity,
+                        task.state,
+                    )
+                    new_tasks.append(new_task)
+                if merged_copies:
+                    new_task = SolidTask(
+                        task.stage,
+                        task.parent_id,
+                        requested_log_weight,
+                        task.multiplicity * merged_copies,
+                        task.state,
+                    )
+                    new_tasks.append(new_task)
+        logger.info(f"Level {stage} has {len(new_tasks)} tasks.")
+        self.work_queue[stage] = new_tasks
+
+    def gen_new_start_batch(self):
+        logger.info(f"Adding batch of {self.batch_size} start tasks.")
+        for _ in range(self.batch_size):
+            self.add_new_start_task()
+
+    def add_new_start_task(self):
         # Choose a random starting state
         state = self.get_random_start_state()
         # Add it to store
         parent_id = self.store.save_structure(-1, 0.0, 1, 1, None, state)
         # Create a new task
-        task = WaterfallTask(0, parent_id, 0.0, 1, state)
-        logger.info("Created new start task.")
-        return task
-
-    def add_new_start_task(self):
-        task = self.get_new_start_task()
+        task = SolidTask(0, parent_id, 0.0, 1, state)
+        self.add_task(0, task)
         logger.info("Added new start task to work queue.")
-        self.add_task(task)
 
     def add_result(self, result):
         task_id, log_weight, new_state = result
@@ -115,64 +187,68 @@ class Waterfall:
         new_log_weight = task.log_weight + log_weight
 
         if task.stage == self.n_stages - 1:
+            # Handle the trajectories that have completed.
             logger.info("Trajectory completed.")
             self.n_completed_traj += 1
-            requested_copies = 0
-            requested_log_weight = new_log_weight
         else:
-            # Update the weight and compute the number of copies
+            # Update the weights.
             self.weights[task.stage].update(new_log_weight, task.multiplicity)
-            requested_copies, requested_log_weight = get_copies(
-                new_log_weight, self.weights[task.stage].log_average
-            )
+
         logger.info(f"{self.n_completed_traj} of {self.n_traj} completed.")
 
-        # decide how many tasks to add
-        normal_copies, merged_copies = get_merged_copies(
-            self.max_queue, self.n_queued, requested_copies
-        )
-        logger.info("Propogating %d requested copies.", requested_copies)
-        logger.info("Currently %d tasks queued.", self.n_queued)
-        if merged_copies == 0:
-            logger.info("Using %d normal copies.", normal_copies)
-        else:
-            logger.info(
-                "Using %d normal copies and a merged copy with %d multiplicity.",
-                normal_copies,
-                merged_copies,
-            )
-
-        # store the results in the database
+        # Store structure in the database.
         parent_id = self.store.save_structure(
             task.stage,
-            requested_log_weight,
-            requested_copies,
+            new_log_weight,
+            -1,  # This will be set to the correct value when the child task is solidified.
             task.multiplicity,
             task.parent_id,
             new_state,
         )
 
-        # queue new tasks
-        if requested_copies == 0:
-            logger.info("Trajectory terminated at stage %d.", task.stage)
-        for _ in range(normal_copies):
-            new_task = WaterfallTask(
+        # Create a liquid task and put it into the queue.
+        if task.stage != self.n_stages - 1:
+            new_task = LiquidTask(
                 stage=task.stage + 1,
                 parent_id=parent_id,
-                log_weight=requested_log_weight,
+                log_weight=new_log_weight,
                 multiplicity=task.multiplicity,
                 state=new_state,
             )
-            self.add_task(new_task)
-        if merged_copies:
-            new_task = WaterfallTask(
-                stage=task.stage + 1,
-                parent_id=parent_id,
-                log_weight=requested_log_weight,
-                multiplicity=task.multiplicity * merged_copies,
-                state=new_state
-            )
-            self.add_task(new_task)
+            self.work_queue[task.stage + 1].append(new_task)
+
+        # If we've completed enough tasks, start draining the queue.
+        if self.n_completed_traj >= self.n_traj:
+            self.drain = True
+
+        self._check_kill()
+
+    def _check_kill(self):
+        # We only check to kill if we are draining.
+        if self.drain:
+            # If nothing is queued, then we're done.
+            if self.n_queued == 0:
+                self.kill = True
+
+            else:
+                # If we are draining and there are only liquid tasks left,
+                # then we are done if the total number of tasks that would
+                # be created is zero.
+                n_tasks = 0
+                for i in range(self.n_stages):
+                    for task in self.work_queue[i]:
+                        if isinstance(task, SolidTask):
+                            return  # If we have a solid task, we can't be done
+
+                        requested_copies, _ = get_copies(
+                            task.log_weight, self.weights[task.stage - 1].log_average
+                        )
+                        n_tasks += requested_copies
+                if n_tasks == 0:
+                    self.kill = True
+
+            if self.kill:
+                logger.info("Completed!!!!")
 
     #
     # private methods
@@ -184,7 +260,7 @@ class Waterfall:
         os.mkdir("Data/Logs")
 
 
-class WaterfallTask:
+class SolidTask:
     def __init__(self, stage, parent_id, log_weight, multiplicity, state):
         self.id = uuid.uuid4().hex
         self.stage = stage
@@ -195,9 +271,35 @@ class WaterfallTask:
 
     def __repr__(self):
         return (
-            f"WaterfallTask(id={self.id}, stage={self.stage}, "
-            "parent_id={self.parent_id}, log_weight={self.log_weight}, "
-            "multiplicity={self.multiplicity}, state=<...>)"
+            f"SolidTask(id={self.id}, stage={self.stage}, "
+            f"parent_id={self.parent_id}, log_weight={self.log_weight}, "
+            f"multiplicity={self.multiplicity}, state=<...>)"
+        )
+
+    @staticmethod
+    def from_liquid(liquid):
+        return SolidTask(
+            liquid.stage,
+            liquid.parent_id,
+            liquid.log_weight,
+            liquid.multiplicity,
+            liquid.state,
+        )
+
+
+class LiquidTask:
+    def __init__(self, stage, parent_id, log_weight, multiplicity, state):
+        self.stage = stage
+        self.parent_id = parent_id
+        self.log_weight = log_weight
+        self.multiplicity = multiplicity
+        self.state = state
+
+    def __repr__(self):
+        return (
+            f"LiquidTask(stage={self.stage}, "
+            f"parent_id={self.parent_id}, log_weight={self.log_weight}, "
+            f"multiplicity={self.multiplicity}, state=<...>)"
         )
 
 
@@ -223,7 +325,7 @@ def _calculate_merged_copies(requested_copies, total_queued, max_queue_size):
 def get_copies(log_weight, log_average_weight):
     ratio = math.exp(log_weight - log_average_weight)
     lower = math.floor(ratio)
-    upper = math.ceil(ratio)
+    upper = lower + 1
     frac = ratio - lower
     if random.random() < frac:
         return int(upper), log_average_weight

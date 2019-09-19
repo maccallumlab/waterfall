@@ -64,12 +64,17 @@ class Client:
         self._logger.info(f"Succesfully pinged server {self._server}.")
 
     def _get_work_unit(self):
-        response = requests.get(f"{self._server}/work_unit")
+        try:
+            response = requests.get(f"{self._server}/work_unit")
+        except:
+            print("fucky")
+            time.sleep(0.5)
+            response = requests.get(f"{self._server}/work_unit")
         if not response:
             raise RuntimeError(
                 f"Unable to get work unit from server. Response code was {response}."
             )
-        task = jsonpickle.decode(response.json())
+        task = jsonpickle.decode(response.text)
         task_id = task.id
         stage = task.stage
         state = task.state
@@ -80,9 +85,13 @@ class Client:
 
     def _post_result(self, task_id, log_weight, new_state):
         data = jsonpickle.encode((task_id, log_weight, new_state))
-        response = requests.post(f"{self._server}/post_result", data=data)
+        try:
+            response = requests.post(f"{self._server}/post_result", data=data)
+        except:
+            print("fucky")
+            time.sleep(0.5)
+            response = requests.post(f"{self._server}/post_result", data=data)
         if not response:
-            print(response)
             raise RuntimeError(
                 f"Unable to post work unit to server. Response code: {response}."
             )
