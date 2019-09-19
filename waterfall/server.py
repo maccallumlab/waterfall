@@ -4,40 +4,41 @@ import logging
 import jsonpickle
 import argparse
 import numpy as np
-from flask import Flask, request
 import logging
-
-# hide werkzeug logging messages
-# log = logging.getLogger('werkzeug')
-# log.setLevel(logging.ERROR)
-app = Flask(__name__)
+from xmlrpc.server import SimpleXMLRPCServer
 
 
-@app.route("/ping", methods=["GET"])
+should_kill = False
+
+
 def ping():
     return "Ping"
 
 
-@app.route("/work_unit", methods=["GET"])
 def get_work_unit():
     t = w.get_task()
     return jsonpickle.encode(t)
 
 
-@app.route("/post_result", methods=["POST"])
-def post_result():
-    result = jsonpickle.decode(request.data)
+def post_result(data):
+    global should_kill
+    result = jsonpickle.decode(data)
     w.add_result(result)
     if w.kill:
         _cleanup()
-        request.environ.get("werkzeug.server.shutdown")()
-    return "Result posted"
+        open("waterfall.complete", "w").close()
+        should_kill = True
+
+    if should_kill:
+        return "Kill"
+    else:
+        return "Result posted"
 
 
-@app.route("/kill", methods=["GET"])
 def kill():
+    global should_kill
     _cleanup()
-    request.environ.get("werkzeug.server.shutdown")()
+    should_kill = True
     return "Server shutting down"
 
 
@@ -67,12 +68,17 @@ def _write_url(host, port):
 
 
 def run(host, port):
+    global should_kill
     _check_lock()
 
     logger.info(f"Starting server on {host}:{port}")
     _write_url(host, port)
-    app.run(host=host, port=port, threaded=False)
 
-    @app.teardown_appcontext
-    def shutdown_session(exception=None):
-        w.store.DBSession.remove()
+    server = SimpleXMLRPCServer((host, port), logRequests=False)
+    server.register_function(ping, "ping")
+    server.register_function(kill, "kill")
+    server.register_function(kill, "kill")
+    server.register_function(get_work_unit, "get_work_unit")
+    server.register_function(post_result, "post_result")
+    while not should_kill:
+        server.handle_request()
