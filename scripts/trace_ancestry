@@ -41,8 +41,8 @@ def color(value):
 
 
 def main():
-    store = vault.connect_db_readonly()
     w = waterfall.Waterfall.load()
+    store = vault.connect_db_readonly(w)
 
     root = Tree()
     root.add_features(stage=-1, log_weight=0.0, cont=True)

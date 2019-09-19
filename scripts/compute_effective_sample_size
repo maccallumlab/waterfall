@@ -1,21 +1,21 @@
-from waterfall import datamanager
+import waterfall
+from waterfall import vault
 import numpy as np
 import math
 
-dm = datamanager.DataManager.activate(read_only=True)
-n_stages = dm.n_stages
+w = waterfall.Waterfall.load()
+store = vault.connect_db_readonly(w)
 
 log_weights = []
-provenances = dm.get_provenances()
+final_structs = store.get_traj_ends()
 
-n = len(provenances)
-samples = 0
-for p in provenances:
-    if p.stage == n_stages - 1:
-        log_weights.append(p.end_log_weight + math.log(p.mult))
-        samples += 1
+for s in final_structs:
+    log_weights.append(s.work + math.log(s.multiplicity))
 
+samples = len(log_weights)
 max_log_weight = max(log_weights)
+n = len(store.get_all())
+
 effective_samples = 0.0
 for w in log_weights:
     rel = math.exp(w - max_log_weight)
