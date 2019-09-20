@@ -106,7 +106,7 @@ class Client:
                     result = func()
                 return result
             except BadStatusLine:
-                self._logger("Got BadStatusLine from server, retrying.")
+                self._logger.info("Got BadStatusLine from server, retrying.")
                 time.sleep(0.5)
         raise RuntimeError("Unsuccessfully retried 10 times.")
 

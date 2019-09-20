@@ -13,13 +13,22 @@ __version__ = "0.0.1"
 
 
 class Waterfall:
-    def __init__(self, n_stages, n_traj, batch_size, max_queue, max_duration=3600):
+    def __init__(
+        self,
+        n_stages,
+        n_traj,
+        batch_size,
+        max_queue,
+        control_width=False,
+        max_duration=3600,
+    ):
         self.n_stages = n_stages
         self.n_traj = n_traj
         self.n_completed_traj = 0
         self.max_queue = max_queue
         self.batch_size = batch_size
         self.max_duration = max_duration
+        self.control_width = control_width
 
         self.work_queue = []
         for _ in range(n_stages):
@@ -120,6 +129,8 @@ class Waterfall:
     def _solidify_queue(self, stage):
         logger.info(f"Solidifying queue level {stage}.")
         tasks = self.work_queue[stage]
+        # We loop through the tasks in a random order.
+        random.shuffle(tasks)
         new_tasks = []
         for task in tasks:
             if isinstance(task, SolidTask):
@@ -130,12 +141,25 @@ class Waterfall:
                 requested_copies, requested_log_weight = get_copies(
                     task.log_weight, self.weights[task.stage - 1].log_average
                 )
-                print(task, requested_copies)
-                # If necessary, merge some copies so that the queue doesn't
-                # get too large.
-                normal_copies, merged_copies = get_merged_copies(
+
+                # Decide how many merged copies to create, either to
+                # control the number of trajectories or to control
+                # the size of the queue.
+                normal_copies_q, merged_copies_q = get_merged_copies(
                     self.max_queue, self.n_queued, requested_copies
                 )
+                normal_copies_t, merged_copies_t = get_merged_copies(
+                    self.counts[0], self.counts[task.stage], requested_copies
+                )
+                if self.control_width and (merged_copies_t > merged_copies_q):
+                    logger.info("Copies merged to maintain the number of trajectories.")
+                    normal_copies = normal_copies_t
+                    merged_copies = merged_copies_t
+                else:
+                    if merged_copies_q:
+                        logger.info("Copies merged to control queue size.")
+                    normal_copies = normal_copies_q
+                    merged_copies = merged_copies_q
                 logger.info(
                     f"Adding {normal_copies} normal copies and {merged_copies} merged copies."
                 )
@@ -153,6 +177,7 @@ class Waterfall:
                         task.state,
                     )
                     new_tasks.append(new_task)
+                    self.counts[task.stage] += 1
                 if merged_copies:
                     new_task = SolidTask(
                         task.stage,
@@ -162,6 +187,7 @@ class Waterfall:
                         task.state,
                     )
                     new_tasks.append(new_task)
+                    self.counts[task.stage] += 1
         logger.info(f"Level {stage} has {len(new_tasks)} tasks.")
         self.work_queue[stage] = new_tasks
 
@@ -336,9 +362,11 @@ def get_copies(log_weight, log_average_weight):
 def get_merged_copies(max_queued, current_queued, requested_copies):
     if current_queued + requested_copies <= max_queued:
         return requested_copies, 0
+    elif current_queued > max_queued:
+        return 0, requested_copies
     else:
         merged_copies = requested_copies + current_queued - max_queued
-        normal_copies = requested_copies - merged_copies
+        normal_copies = max(0, requested_copies - merged_copies)
     return normal_copies, merged_copies
 
 

@@ -1,30 +1,27 @@
 import random
 import math
 import numpy as np
-from waterfall import WaterfallRunner
+import time
+from waterfall.waterfall_runner import WaterfallRunner
 
 np.random.seed(seed=2019)
 
 
-def gen_start():
-    x = np.random.normal(size=100)
-    # x[0] will be the work per stage
-    return x
+def iter_start():
+    results = []
+    for i in range(100):
+        x = np.random.normal(size=100)
+        results.append(x)
+    return results
 
 
-def run(stage, start_state, start_weight):
+def run(stage, start_state):
     new_state = np.random.normal(size=100)
     # state[0] is the work per stage
     new_state[0] = start_state[0]
-    weight_factor = start_state[0] + np.random.normal(scale=0.2)
-    return new_state, start_weight + weight_factor
+    new_state[0] = np.random.normal(loc=start_state[0], scale=0.10, size=1)[0]
+    return new_state[0], new_state
 
 
-n_stages = 20
-n_traj = 2000
-n_seed_traj = 2000
-max_queue_size = 20_000
-
-
-waterfall = WaterfallRunner(gen_start, run)
+waterfall = WaterfallRunner(iter_start, run)
 waterfall.run()

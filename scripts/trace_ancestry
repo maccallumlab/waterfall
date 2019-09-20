@@ -21,8 +21,12 @@ def RGB_to_hex(RGB):
 def trace(node, parent):
     new_node = node.add_child()
     cont = True if parent.copies > 0 else False
-    new_node.add_features(stage=parent.stage, log_weight=parent.work, cont=cont)
-    log_weights[parent.stage].append(parent.work)
+    new_node.add_features(
+        stage=parent.stage,
+        log_weight=parent.work + math.log(parent.multiplicity),
+        cont=cont,
+    )
+    log_weights[parent.stage].append(parent.work + math.log(parent.multiplicity))
     for child in parent.children:
         trace(new_node, child)
 
@@ -30,9 +34,9 @@ def trace(node, parent):
 def normalize(value, min_, max_):
     delta = max_ - min_
     if delta == 0.0:
-        norm = 1.0
+        return 0.5
     else:
-        norm = (value - min_) / delta
+        norm = math.exp(value - max_)
     return 1.0 - norm
 
 
@@ -61,11 +65,8 @@ def main():
     for n in root.traverse():
         if n.cont or n.stage == (w.n_stages - 1):
             n.img_style["fgcolor"] = color(
-                # normalize(n.log_weight, min_log_weights[n.stage], max_log_weights[n.stage])
                 normalize(
-                    n.log_weight,
-                    np.min(list(min_log_weights.values())),
-                    np.max(list(max_log_weights.values())),
+                    n.log_weight, min_log_weights[n.stage], max_log_weights[n.stage]
                 )
             )
         else:
