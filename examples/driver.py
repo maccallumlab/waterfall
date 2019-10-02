@@ -53,7 +53,7 @@ def run(stage, start_state):
 # server.log.
 # [port] can 50000, 50001, etc. Each server needs its own port.
 # [host] should be the ip address of the server's internal network adapter.
-#        You can usually figure this out from the output of iconfig.
+#        You can usually figure this out from the output of ifconfig.
 #        For glados, this will be something like "172.25.0.2".
 #
 # Next, inside of a job script, we run the client. This will typically be done
