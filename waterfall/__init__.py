@@ -6,6 +6,7 @@ import math
 import time
 import os
 import logging
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ class Waterfall:
 
         self.in_progress = {}
         self.start_states = []
-        self.weights = [LogAverageWeight() for _ in range(self.n_stages)]
+        self.weights = WeightManager(self.n_stages)
         self.counts = [0 for _ in range(self.n_stages)]
         self.store = None
         self.drain = False
@@ -127,6 +128,7 @@ class Waterfall:
         return None
 
     def _solidify_queue(self, stage):
+        average_weight = self.weights.get_log_average_weight(stage - 1)
         logger.info(f"Solidifying queue level {stage}.")
         tasks = self.work_queue[stage]
         # We loop through the tasks in a random order.
@@ -138,8 +140,8 @@ class Waterfall:
             else:
                 # Compute the number of copies by comparing the
                 # weight to the average weight.
-                requested_copies, requested_log_weight = get_copies(
-                    task.log_weight, self.weights[task.stage - 1].log_average
+                requested_copies, requested_log_weight, log_contribution = get_copies(
+                    task.log_weight, average_weight
                 )
 
                 # Decide how many merged copies to create, either to
@@ -175,6 +177,7 @@ class Waterfall:
                         requested_log_weight,
                         task.multiplicity,
                         task.state,
+                        log_contribution,
                     )
                     new_tasks.append(new_task)
                     self.counts[task.stage] += 1
@@ -185,6 +188,7 @@ class Waterfall:
                         requested_log_weight,
                         task.multiplicity * merged_copies,
                         task.state,
+                        log_contribution,
                     )
                     new_tasks.append(new_task)
                     self.counts[task.stage] += 1
@@ -202,7 +206,7 @@ class Waterfall:
         # Add it to store
         parent_id = self.store.save_structure(-1, 0.0, 1, 1, None, state)
         # Create a new task
-        task = SolidTask(0, parent_id, 0.0, 1, state)
+        task = SolidTask(0, parent_id, 0.0, 1, state, 0)
         self.add_task(0, task)
         logger.info("Added new start task to work queue.")
 
@@ -218,7 +222,9 @@ class Waterfall:
             self.n_completed_traj += 1
         else:
             # Update the weights.
-            self.weights[task.stage].update(new_log_weight, task.multiplicity)
+            self.weights.add_sample(
+                task.stage, log_weight, task.log_contribution, task.multiplicity
+            )
 
         logger.info(f"{self.n_completed_traj} of {self.n_traj} completed.")
 
@@ -287,29 +293,23 @@ class Waterfall:
 
 
 class SolidTask:
-    def __init__(self, stage, parent_id, log_weight, multiplicity, state):
+    def __init__(
+        self, stage, parent_id, log_weight, multiplicity, state, log_contribution
+    ):
         self.id = uuid.uuid4().hex
         self.stage = stage
         self.parent_id = parent_id
         self.log_weight = log_weight
         self.multiplicity = multiplicity
         self.state = state
+        self.log_contribution = log_contribution
 
     def __repr__(self):
         return (
             f"SolidTask(id={self.id}, stage={self.stage}, "
             f"parent_id={self.parent_id}, log_weight={self.log_weight}, "
-            f"multiplicity={self.multiplicity}, state=<...>)"
-        )
-
-    @staticmethod
-    def from_liquid(liquid):
-        return SolidTask(
-            liquid.stage,
-            liquid.parent_id,
-            liquid.log_weight,
-            liquid.multiplicity,
-            liquid.state,
+            f"multiplicity={self.multiplicity}, log_contribution={self.log_contribution}, "
+            f"state=<...>)"
         )
 
 
@@ -353,10 +353,18 @@ def get_copies(log_weight, log_average_weight):
     lower = math.floor(ratio)
     upper = lower + 1
     frac = ratio - lower
+
     if random.random() < frac:
-        return int(upper), log_average_weight
+        copies = int(upper)
     else:
-        return int(lower), log_average_weight
+        copies = int(lower)
+
+    if copies == 0:
+        log_contribution = -math.inf
+    else:
+        log_contribution = log_weight - math.log(copies)
+
+    return copies, log_average_weight, log_contribution
 
 
 def get_merged_copies(max_queued, current_queued, requested_copies):
@@ -370,21 +378,33 @@ def get_merged_copies(max_queued, current_queued, requested_copies):
     return normal_copies, merged_copies
 
 
-class LogAverageWeight:
-    def __init__(self):
-        self.logsum = -math.inf
-        self.count = 0
-
-    def update(self, log_weight, multiplicity):
-        self.logsum = log_sum_exp(self.logsum, log_weight + math.log(multiplicity))
-        self.count += multiplicity
-
-    @property
-    def log_average(self):
-        return self.logsum - math.log(self.count)
-
-
 def log_sum_exp(log_w1, log_w2):
     "Return ln(exp(log_w1) + exp(log_w2)) avoiding overflow."
     log_max = max(log_w1, log_w2)
     return log_max + math.log(math.exp(log_w1 - log_max) + math.exp(log_w2 - log_max))
+
+
+class WeightManager:
+    def __init__(self, n_levels):
+        self.n_levels = n_levels
+        self._average_log_deltas = -np.inf * np.ones(n_levels)
+        self._sum_log_contributions = -np.inf * np.ones(n_levels)
+
+    def add_sample(self, level, delta_log_weight, log_contribution, multiplicity):
+        new_contribution = log_sum_exp(
+            math.log(multiplicity) + log_contribution,
+            self._sum_log_contributions[level],
+        )
+        new_log_average = (
+            log_sum_exp(
+                math.log(multiplicity) + log_contribution + delta_log_weight,
+                self._sum_log_contributions[level] + self._average_log_deltas[level],
+            )
+            - new_contribution
+        )
+        self._average_log_deltas[level] = new_log_average
+        self._sum_log_contributions[level] = new_contribution
+
+    def get_log_average_weight(self, level):
+        return np.sum(self._average_log_deltas[: (level + 1)])
+        # return self._average_log_deltas[level]

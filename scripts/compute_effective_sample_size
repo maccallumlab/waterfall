@@ -3,6 +3,12 @@ from waterfall import vault
 import numpy as np
 import math
 
+
+def log_sum_exp(data):
+    high = np.max(data)
+    return np.log(np.sum(np.exp(data - high))) + high
+
+
 w = waterfall.Waterfall.load()
 store = vault.connect_db_readonly(w)
 
@@ -21,10 +27,15 @@ for w in log_weights:
     rel = math.exp(w - max_log_weight)
     print(rel)
     effective_samples += rel
+total_weight = log_sum_exp(log_weights)
 
 print()
-print("work units", n)
+print("work units:", n)
 print("samples:", samples)
 print("effective samples:", effective_samples)
 print("effective samples per sample:", effective_samples / samples)
 print("effective samples per work unit:", effective_samples / n)
+print("total log weight:", total_weight)
+print("total log weight per sample", total_weight - np.log(samples))
+print("total log weight per work unit:", total_weight - np.log(n))
+print("maximum log weight:", np.max(log_weights))
