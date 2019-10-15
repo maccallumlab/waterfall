@@ -206,7 +206,7 @@ class Waterfall:
         # Add it to store
         parent_id = self.store.save_structure(-1, 0.0, 1, 1, None, state)
         # Create a new task
-        task = SolidTask(0, parent_id, 0.0, 1, state, 0)
+        task = SolidTask(0, parent_id, 0.0, 1, state, 0.0)
         self.add_task(0, task)
         logger.info("Added new start task to work queue.")
 
@@ -223,7 +223,7 @@ class Waterfall:
         else:
             # Update the weights.
             self.weights.add_sample(
-                task.stage, log_weight, task.log_contribution, task.multiplicity
+                task.stage, new_log_weight, task.log_contribution, task.multiplicity
             )
 
         logger.info(f"{self.n_completed_traj} of {self.n_traj} completed.")
@@ -406,5 +406,5 @@ class WeightManager:
         self._sum_log_contributions[level] = new_contribution
 
     def get_log_average_weight(self, level):
-        return np.sum(self._average_log_deltas[: (level + 1)])
-        # return self._average_log_deltas[level]
+        # return np.sum(self._average_log_deltas[: (level + 1)])
+        return self._average_log_deltas[level]
